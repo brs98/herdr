@@ -8,12 +8,11 @@ use ratatui::{
 
 use super::sidebar::{
     agent_panel_entries, agent_panel_entries_from, grouped_child_display_label,
-    next_entry_is_indented_workspace, workspace_list_entries_expanded, AgentPanelEntry,
-    WorkspaceListEntry,
+    next_entry_is_indented_workspace, workspace_list_entries_expanded, WorkspaceListEntry,
 };
 use super::status::{state_icon, state_icon_symbol};
 use super::text::{display_width_u16, truncate_end};
-use crate::app::state::{Palette, ToastKind, ToastNotification};
+use crate::app::state::{AgentPanelEntry, Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
 use crate::config::StatusIndicatorStyle;
 use crate::detect::AgentState;

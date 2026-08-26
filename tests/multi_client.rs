@@ -760,10 +760,9 @@ fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
     frame_text(frame).contains(needle)
 }
 
-fn agent_panel_starts_with(frame: &FrameWire, agent_label: &str) -> bool {
+fn sidebar_tree_starts_with(frame: &FrameWire, agent_label: &str) -> bool {
     frame_text(frame)
         .lines()
-        .skip_while(|line| !line.contains("agents"))
         .skip(1)
         .find(|line| line.contains("agent-"))
         .is_some_and(|line| line.contains(agent_label))
@@ -850,7 +849,7 @@ fn multi_client_effective_size_shrinks_when_smaller_client_joins() {
 }
 
 #[test]
-fn non_foreground_client_render_preserves_agent_panel_scroll() {
+fn non_foreground_client_render_preserves_sidebar_tree_scroll() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -873,16 +872,16 @@ fn non_foreground_client_render_preserves_agent_panel_scroll() {
     drain_server_messages(&mut setup_client, Duration::from_millis(250));
 
     let wheel_down = b"\x1b[<65;10;30M";
-    send_client_input(&mut setup_client, &wheel_down.repeat(20));
+    send_client_input(&mut setup_client, &wheel_down.repeat(100));
     let (reached_bottom, setup_frames) = wait_for_frame_matching_with_snapshots(
         &mut setup_client,
         Duration::from_secs(3),
-        |frame| agent_panel_starts_with(frame, "agent-16"),
+        |frame| sidebar_tree_starts_with(frame, "agent-11"),
     )
     .expect("setup frame decoding should succeed");
     assert!(
         reached_bottom,
-        "40-row client should scroll the agent panel to its final page; frames:\n{}",
+        "40-row client should scroll the sidebar tree to its final page; frames:\n{}",
         setup_frames.join("\n--- frame ---\n")
     );
     send_client_detach(&mut setup_client);
@@ -893,7 +892,7 @@ fn non_foreground_client_render_preserves_agent_panel_scroll() {
     let mut probe = connect_raw_client(&client_socket, 106, 40);
     let (started_at_tall_limit, initial_frames) =
         wait_for_frame_matching_with_snapshots(&mut probe, Duration::from_secs(3), |frame| {
-            agent_panel_starts_with(frame, "agent-10")
+            sidebar_tree_starts_with(frame, "agent-03")
         })
         .expect("initial probe frame decoding should succeed");
     assert!(
@@ -903,10 +902,10 @@ fn non_foreground_client_render_preserves_agent_panel_scroll() {
     );
     drain_server_messages(&mut probe, Duration::from_millis(250));
 
-    send_client_input(&mut probe, wheel_down);
+    send_client_input(&mut probe, &wheel_down.repeat(3));
     let (scrolled, probe_frames) =
         wait_for_frame_matching_with_snapshots(&mut probe, Duration::from_secs(3), |frame| {
-            agent_panel_starts_with(frame, "agent-11")
+            sidebar_tree_starts_with(frame, "agent-04")
         })
         .expect("probe frame decoding should succeed");
     assert!(

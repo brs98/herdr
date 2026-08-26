@@ -24,10 +24,21 @@ Press `prefix+?` at any time to see every active binding. Press `/` in the keybi
 | New tab | `prefix+c` |
 | Split right / down | `prefix+v` / `prefix+minus` |
 | Move between panes | `prefix+h/j/k/l` |
-| Workspace navigation | `prefix+w` |
+| Sidebar tree navigation | `prefix+w` |
 | Detach, leave everything running | `prefix+q` |
 
 These cover most daily movement. Everything else can stay on the mouse.
+
+## Navigate the sidebar tree
+
+Press `prefix+w` to focus the expanded desktop sidebar. Herdr selects the currently focused pane in the workspace → tab → pane tree; if the sidebar is collapsed, it opens first.
+
+- Move through visible rows with `up`/`down` or `k`/`j`.
+- Use `left`/`h` to collapse an open workspace or tab, then move to its parent. Use `right`/`l` to expand it, then move to its first child. Space toggles the selected workspace or tab.
+- Press Enter to focus the selected workspace, tab, shell pane, or Agent pane. Moving the tree cursor alone does not change terminal focus.
+- Press `/` to filter the tree in place. Type or paste a query, use Backspace or `ctrl+u` to edit it, and keep moving with `up`/`down`. Esc returns to the tree while keeping the filter; press Esc again to leave Navigate mode.
+
+`prefix+g` remains the larger session navigator, including Agent-state filters, when you want a fast picker instead of working in the sidebar.
 
 ## The rest, by task
 

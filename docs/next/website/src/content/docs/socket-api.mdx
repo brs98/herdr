@@ -405,11 +405,13 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 
 ## Agent view queries
 
-`agent.view.set` installs one transient declarative projection for the built-in
-Agents view. The projection is reevaluated whenever agent facts or current UI
-context change. It controls the expanded and collapsed sidebar, mobile Agents
-list, mouse targets, indexed focus, and next/previous Agent navigation. It does
-not change `agent.list`, notifications, detection, or global attention counts.
+`agent.view.set` installs one transient declarative projection for Agent lists.
+The projection is reevaluated whenever agent facts or current UI context change.
+It controls the compact collapsed rail, mobile Agents list, their mouse targets,
+indexed focus, and next/previous Agent navigation. The expanded session tree
+always keeps its full workspace, tab, and pane hierarchy; this projection does
+not filter or reorder that tree. It also does not change `agent.list`,
+notifications, detection, or global attention counts.
 
 Show agents in the currently presented Space or agents needing attention
 elsewhere, then order by attention and most recent state transition:
@@ -759,7 +761,7 @@ Use `pane.report_metadata` when a user hook wants to customize presentation with
 
 Metadata reports are display-only. Valid metadata can override the pane title, displayed agent name, visible state labels, and arbitrary named tokens. `working`, `blocked`, `idle`, waits, notifications, and rollups still come from semantic state. Native session restore comes from stored official session references. `agent` is an optional guard for presentation fields against the authoritative agent label; `applies_to_source` similarly guards presentation fields against the active lifecycle authority source. These guards do not apply to token patches: token reporters own clearing and TTL refresh. Use `display_agent` to change the visible name. `state_labels` keys must be `idle`, `working`, `blocked`, `done`, or `unknown`.
 
-Token maps are per-resource patches. A string sets a key, JSON `null` clears it, and omitted keys remain unchanged. The latest accepted update wins. Optional TTL applies independently to token keys updated by that report. Pane tokens are exposed by pane and agent get/list responses and can be rendered as `$name` in Agent sidebar rows. A report may mention at most 16 token keys, and a pane or workspace may retain at most 32 keys. Token names are 1–32 ASCII letters, digits, underscores, or hyphens.
+Token maps are per-resource patches. A string sets a key, JSON `null` clears it, and omitted keys remain unchanged. The latest accepted update wins. Optional TTL applies independently to token keys updated by that report. Pane tokens are exposed by pane and agent get/list responses and can be rendered as `$name` in Agent pane-node layouts. A report may mention at most 16 token keys, and a pane or workspace may retain at most 32 keys. Token names are 1–32 ASCII letters, digits, underscores, or hyphens.
 
 Workspace tokens use the same contract:
 
@@ -767,7 +769,7 @@ Workspace tokens use the same contract:
 {"id":"req_3","method":"workspace.report_metadata","params":{"workspace_id":"w1","source":"user:jj","tokens":{"jj_status":"2 changes","old":null},"ttl_ms":5000}}
 ```
 
-Workspace get/list responses expose the resulting `tokens` map, and Space sidebar rows can render values such as `$jj_status`. Changes and TTL expiry emit `workspace.metadata_updated` with the latest workspace snapshot. This metadata event is available to API subscribers but does not invoke plugin event hooks.
+Workspace get/list responses expose the resulting `tokens` map, and workspace-node layouts can render values such as `$jj_status`. Changes and TTL expiry emit `workspace.metadata_updated` with the latest workspace snapshot. This metadata event is available to API subscribers but does not invoke plugin event hooks.
 
 Presentation text is normalized before storage. Herdr trims surrounding whitespace, removes control characters, and caps `title`, `display_agent`, each state label, and token values at 80 characters. Empty normalized token values clear that key.
 

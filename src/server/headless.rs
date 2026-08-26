@@ -4203,6 +4203,7 @@ impl HeadlessServer {
                             crate::kitty_graphics::HostCellSize::default()
                         };
                     let preserved_scroll = (!is_foreground).then_some((
+                        self.app.state.sidebar_tree_scroll,
                         self.app.state.workspace_scroll,
                         self.app.state.agent_panel_scroll,
                         self.app.state.tab_scroll,
@@ -4216,7 +4217,10 @@ impl HeadlessServer {
                             is_foreground,
                             render_cell_size,
                         );
-                    if let Some((workspace, agent_panel, tab, mobile_switcher)) = preserved_scroll {
+                    if let Some((sidebar_tree, workspace, agent_panel, tab, mobile_switcher)) =
+                        preserved_scroll
+                    {
+                        self.app.state.sidebar_tree_scroll = sidebar_tree;
                         self.app.state.workspace_scroll = workspace;
                         self.app.state.agent_panel_scroll = agent_panel;
                         self.app.state.tab_scroll = tab;

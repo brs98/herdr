@@ -301,10 +301,11 @@ Worktree 命令也发出生命周期事件。`worktree.create` 发出 `workspace
 
 ## 智能体视图查询
 
-`agent.view.set` 为内置 Agents 视图设置一个临时的声明式投影。智能体信息或当前
-UI 上下文变化时,该投影会重新求值。它控制展开和折叠的侧边栏、移动端 Agents
-列表、鼠标目标、编号聚焦以及上一个/下一个智能体的导航顺序。它不会改变
-`agent.list`、通知、检测或全局待处理计数。
+`agent.view.set` 为 Agent 列表设置一个临时的声明式投影。智能体信息或当前 UI
+上下文变化时,该投影会重新求值。它控制折叠后的紧凑栏、移动端 Agents 列表、
+这些列表的鼠标目标、编号聚焦以及上一个/下一个智能体的导航顺序。展开的会话树
+始终保留完整的工作区、标签页和窗格层级;该投影不会过滤或重排这棵树。它也不会
+改变 `agent.list`、通知、检测或全局待处理计数。
 
 下面的示例显示当前呈现的 Space 中的智能体,以及其他位置需要处理的智能体,
 然后按待处理优先级和最近状态转换排序:
@@ -597,7 +598,7 @@ Herdr 存有原生会话引用时,`pane.get`、`pane.list`、`agent.get` 和 `ag
 
 元数据上报只影响展示。有效的元数据可以覆盖窗格标题、显示的智能体名称、可见的状态标签和任意命名令牌。`working`、`blocked`、`idle`、等待、通知和汇总仍来自语义状态。原生会话恢复来自存储的官方会话引用。`agent` 是展示字段针对权威智能体标签的可选守卫;`applies_to_source` 同样保护展示字段,使其只适用于活动生命周期权威来源。这些守卫不作用于令牌补丁;令牌上报方负责清除和刷新 TTL。用 `display_agent` 修改可见名称。`state_labels` 的键必须是 `idle`、`working`、`blocked`、`done` 或 `unknown`。
 
-令牌映射是针对每个资源的补丁。字符串设置键,JSON `null` 清除键,未提及的键保持不变。最后接受的更新生效。可选 TTL 分别应用于该次上报更新的每个令牌键。窗格令牌会在 pane 和 agent 的 get/list 响应中公开,并可在智能体侧边栏行中写成 `$name`。单次上报最多可包含 16 个令牌键,每个窗格或工作区最多保留 32 个键。令牌名称必须由 1–32 个 ASCII 字母、数字、下划线或连字符组成。
+令牌映射是针对每个资源的补丁。字符串设置键,JSON `null` 清除键,未提及的键保持不变。最后接受的更新生效。可选 TTL 分别应用于该次上报更新的每个令牌键。窗格令牌会在 pane 和 agent 的 get/list 响应中公开,并可在 Agent 窗格节点布局中写成 `$name`。单次上报最多可包含 16 个令牌键,每个窗格或工作区最多保留 32 个键。令牌名称必须由 1–32 个 ASCII 字母、数字、下划线或连字符组成。
 
 工作区令牌使用相同约定:
 
@@ -605,7 +606,7 @@ Herdr 存有原生会话引用时,`pane.get`、`pane.list`、`agent.get` 和 `ag
 {"id":"req_3","method":"workspace.report_metadata","params":{"workspace_id":"w1","source":"user:jj","tokens":{"jj_status":"2 changes","old":null},"ttl_ms":5000}}
 ```
 
-workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏行可显示 `$jj_status` 这类值。变更和 TTL 到期会发出包含最新工作区快照的 `workspace.metadata_updated`。该元数据事件会发送给 API 订阅者,但不会调用插件事件钩子。
+workspace 的 get/list 响应会公开生成的 `tokens` 映射,工作区节点布局可显示 `$jj_status` 这类值。变更和 TTL 到期会发出包含最新工作区快照的 `workspace.metadata_updated`。该元数据事件会发送给 API 订阅者,但不会调用插件事件钩子。
 
 展示文本在存储前被规范化。Herdr 去掉首尾空白、移除控制字符,并把 `title`、`display_agent`、每个状态标签和令牌值截断到 80 个字符。规范化后为空的令牌值会清除该键。
 

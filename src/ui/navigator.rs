@@ -6,10 +6,13 @@ use ratatui::{
     Frame,
 };
 
+#[cfg(test)]
+use super::tree::has_following_sibling_at_depth;
 use super::{
     scrollbar::{render_scrollbar, should_show_scrollbar},
     status::{state_icon, state_label_color},
     text::{display_width_u16, middle_elide, truncate_end},
+    tree::tree_prefix,
     widgets::{panel_contrast_fg, render_panel_shell},
 };
 use crate::app::state::{
@@ -269,42 +272,6 @@ fn render_row(
             meta_rect,
         );
     }
-}
-
-/// Tree prefix for a navigator row: expand caret for workspaces, connected
-/// branch glyphs for children (`├──`, `└──` for the last sibling, with `│`
-/// continuation lines under ancestors that have more siblings below).
-fn tree_prefix(rows: &[NavigatorRow], idx: usize) -> String {
-    let row = &rows[idx];
-    if row.is_workspace {
-        return if row.expanded { "▾" } else { "▸" }.to_string();
-    }
-    if row.depth == 0 {
-        return "  ".to_string();
-    }
-    let mut prefix = String::new();
-    for level in 1..row.depth {
-        prefix.push_str(if has_following_sibling_at_depth(rows, idx, level) {
-            "│  "
-        } else {
-            "   "
-        });
-    }
-    prefix.push_str(if has_following_sibling_at_depth(rows, idx, row.depth) {
-        "├──"
-    } else {
-        "└──"
-    });
-    prefix
-}
-
-/// Whether another row at `depth` follows `idx` before the subtree at that
-/// depth ends (a row shallower than `depth` closes the subtree).
-fn has_following_sibling_at_depth(rows: &[NavigatorRow], idx: usize, depth: u8) -> bool {
-    rows[idx + 1..]
-        .iter()
-        .take_while(|row| row.depth >= depth)
-        .any(|row| row.depth == depth)
 }
 
 fn render_navigator_scrollbar(app: &AppState, line_count: usize, frame: &mut Frame, body: Rect) {

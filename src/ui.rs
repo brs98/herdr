@@ -20,6 +20,7 @@ mod status;
 mod tab_surface;
 mod tabs;
 mod text;
+mod tree;
 mod widgets;
 
 use self::dialogs::{
@@ -76,16 +77,20 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
-        agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
-        agent_panel_toggle_rect, all_agent_panel_entries, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
+        agent_panel_entries, all_agent_panel_entries, collapsed_sidebar_sections,
+        collapsed_sidebar_toggle_rect, compute_sidebar_tree_row_areas,
+        compute_sidebar_tree_workspace_card_areas, compute_workspace_card_areas,
+        expanded_sidebar_toggle_rect, sidebar_tree_body_rect, sidebar_tree_rows,
+        sidebar_tree_rows_from, sidebar_tree_scroll_metrics, sidebar_tree_scrollbar_rect,
         workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry,
-        WorkspaceListEntry,
+        workspace_list_entries_expanded, workspace_parent_group_state, WorkspaceListEntry,
     },
+};
+
+#[cfg(test)]
+pub(crate) use self::sidebar::{
+    agent_panel_toggle_rect, expanded_sidebar_sections, sidebar_section_divider_rect,
+    workspace_list_scroll_metrics,
 };
 
 pub(crate) use self::{
@@ -243,11 +248,43 @@ fn compute_view_internal(
         .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, main_area))
         .unwrap_or((Rect::default(), main_area));
 
+    let sidebar_tree_agent_entries = if app.sidebar_collapsed {
+        std::collections::HashMap::new()
+    } else {
+        sidebar::all_agent_panel_entries_from(app, terminal_runtimes)
+            .into_iter()
+            .map(|entry| (entry.pane_id, entry))
+            .collect()
+    };
+    let sidebar_tree_rows = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::sidebar_tree_rows_from_cached(
+            app,
+            terminal_runtimes,
+            Some(&sidebar_tree_agent_entries),
+        )
+    };
     if !app.sidebar_collapsed {
-        app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
-        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
-        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        if app.mode == Mode::Navigate {
+            app.reconcile_sidebar_tree_selection_for_rows(&sidebar_tree_rows);
+            let viewport = sidebar::sidebar_tree_body_rect(sidebar_area, false).height as usize;
+            if viewport > 0 {
+                let selected = app.sidebar_tree_navigation.selected;
+                if selected < app.sidebar_tree_scroll {
+                    app.sidebar_tree_scroll = selected;
+                } else if selected >= app.sidebar_tree_scroll.saturating_add(viewport) {
+                    app.sidebar_tree_scroll = selected.saturating_add(1).saturating_sub(viewport);
+                }
+            }
+        }
+        let max_tree_scroll = sidebar::sidebar_tree_scroll_metrics_for_row_count(
+            sidebar_tree_rows.len(),
+            app.sidebar_tree_scroll,
+            sidebar_area,
+        )
+        .max_offset_from_bottom;
+        app.sidebar_tree_scroll = app.sidebar_tree_scroll.min(max_tree_scroll);
     } else {
         app.workspace_scroll = app
             .workspace_scroll
@@ -255,10 +292,22 @@ fn compute_view_internal(
         app.agent_panel_scroll = 0;
     }
 
+    let sidebar_tree_row_areas = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_sidebar_tree_row_areas_from_rows(
+            &sidebar_tree_rows,
+            app.sidebar_tree_scroll,
+            sidebar_area,
+        )
+    };
     let workspace_card_areas = if app.sidebar_collapsed {
         Vec::new()
     } else {
-        compute_workspace_card_areas(app, sidebar_area)
+        sidebar::compute_sidebar_tree_workspace_card_areas_from_rows(
+            &sidebar_tree_rows,
+            &sidebar_tree_row_areas,
+        )
     };
 
     let tab_bar_view = app
@@ -307,6 +356,10 @@ fn compute_view_internal(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
+        sidebar_tree_computed: true,
+        sidebar_tree_rows,
+        sidebar_tree_agent_entries,
+        sidebar_tree_row_areas,
         workspace_card_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -370,6 +423,10 @@ fn compute_mobile_view(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
+        sidebar_tree_computed: false,
+        sidebar_tree_rows: Vec::new(),
+        sidebar_tree_agent_entries: std::collections::HashMap::new(),
+        sidebar_tree_row_areas: Vec::new(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -1076,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_sidebar_workspace_rows_show_state_before_name_without_numbers() {
+    fn expanded_sidebar_workspace_nodes_show_state_name_and_branch_without_numbers() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("one");
         let repo = temp_git_repo("main");
@@ -1101,12 +1158,12 @@ mod tests {
         let buffer = terminal.backend().buffer();
 
         let card = app.view.workspace_card_areas[0].rect;
-        let line1 = buffer_row_text(buffer, card, card.y);
-        let line2 = buffer_row_text(buffer, card, card.y + 1);
+        let workspace_line = buffer_row_text(buffer, card, card.y);
 
-        assert!(line1.starts_with(" · one"));
-        assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
+        assert!(workspace_line.contains("· one"));
+        assert!(workspace_line.contains("main"));
+        assert!(!workspace_line.contains("1 one"));
+        assert_eq!(card.height, 1);
 
         std::fs::remove_dir_all(repo).ok();
     }

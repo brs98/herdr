@@ -139,7 +139,7 @@ next_tab = ["prefix+n", "ctrl+alt+]"]
 
 可选动作默认不设置。使用 `prefix+` 可获得前缀模式行为；当你确实需要直接快捷键时，请使用显式的修饰组合键。
 
-按键字符串支持普通按键、`ctrl+a`、`shift+n`、`alt+1`、`cmd+k` 等修饰组合键，以及 `enter`、`tab`、`esc`、`left`、`right`、`up`、`down` 等特殊键。也支持 `minus`、`comma`、`ampersand`、`plus`、`backtick` 等命名标点。直接绑定 `n` 这样的普通可打印键并不安全，因为它会拦截输入；除非你有意设置直接绑定，否则请使用 `prefix+n`。`navigate_workspace_*` 和 `navigate_pane_*` 字段仅在导航模式中生效，可以使用 `j` 或 `k` 等普通按键；它们不得使用 `prefix+`、`esc`、`enter`、`tab`、`shift+tab`、`left`、`right`，也不得使用无修饰键的 `1` 到 `9`。左右方向键是向左和向右导航窗格的永久别名。这些导航模式快捷键独立于 `focus_pane_down = "prefix+j"` 等通用动作绑定；两者使用同一按键时，打开导航模式后，导航模式快捷键优先。Alt、Cmd/Super 以及带修饰键的标点取决于你的终端和 tmux 设置。
+按键字符串支持普通按键、`ctrl+a`、`shift+n`、`alt+1`、`cmd+k` 等修饰组合键，以及 `enter`、`tab`、`esc`、`left`、`right`、`up`、`down` 等特殊键。也支持 `minus`、`comma`、`ampersand`、`plus`、`backtick` 等命名标点。直接绑定 `n` 这样的普通可打印键并不安全，因为它会拦截输入；除非你有意设置直接绑定，否则请使用 `prefix+n`。`navigate_workspace_*` 和 `navigate_pane_*` 字段仅在 Navigate 模式中生效，可以使用 `j` 或 `k` 等普通按键；它们不得使用 `prefix+`、`esc`、`enter`、`tab`、`shift+tab`、`left`、`right`，也不得使用无修饰键的 `1` 到 `9`。在桌面侧边栏树中，上下绑定与 `navigate_pane_up/down` 用于在可见行之间移动，`navigate_pane_left/right` 与左右方向键用于折叠、展开或在父子节点之间移动。这些快捷键独立于 `focus_pane_down = "prefix+j"` 等通用动作绑定；Navigate 模式打开时，本地导航快捷键优先。Alt、Cmd/Super 以及带修饰键的标点取决于你的终端和 tmux 设置。
 
 如果你已有旧的自定义按键绑定，并想使用新的默认值，请运行 `herdr config reset-keys`。Herdr 会备份 `config.toml`，移除 `[keys]` 和 `[[keys.command]]`，并在重启或执行 `herdr server reload-config` 后使用内置的 v2 默认值。
 
@@ -253,11 +253,11 @@ yellow = "#f9e2af"
 
 ## UI 与侧边栏
 
-侧边栏是 Herdr 的主仪表盘。在[配置参考](/docs/config-reference/)中搜索 `ui.`，可查看尺寸、折叠模式、Agent 面板排序、鼠标行为、窗格边框和其他显示设置。
+侧边栏是 Herdr 的主仪表盘。展开的桌面视图是一棵会话树：工作区包含标签页，标签页包含 shell 或 Agent 窗格。即使工作区只有一个标签页，也会明确显示该标签页。点击任意节点即可聚焦对应的工作区、标签页或窗格。按 `prefix+w` 可用键盘聚焦该树，再使用 `j`/`k`、`h`/`l`、Enter 和 `/` 移动、折叠/展开、激活和就地筛选。在[配置参考](/docs/config-reference/)中搜索 `ui.`，可查看尺寸、折叠模式、鼠标行为、窗格边框和其他显示设置。`ui.agent_panel_sort` 仍控制 Agent 循环切换顺序和折叠后的紧凑栏，但不会改变层级树的顺序。
 
-### 侧边栏行布局
+### 侧边栏树节点布局
 
-展开的桌面侧边栏会将 `rows` 中的每个内层数组渲染为一行。以下是完整的默认布局：
+现有的 Space 和 Agent 布局设置用于设置树中工作区节点和已检测 Agent 窗格节点的样式。每个树节点占用一个终端行。Herdr 会解析 `rows` 中的每个内层数组，再按顺序将其中的非空值展平到该节点的一行中。以下是完整的默认布局：
 
 ```toml
 [ui.sidebar.agents]
@@ -296,7 +296,7 @@ Space 行支持以下内置 token：
 - `git_status` — 非零时显示 Git ahead 和 behind 数量。
 - `$name` — 名为 `name` 的自定义工作区元数据。
 
-token 会按配置顺序渲染。Herdr 通常使用 ` · ` 分隔相邻值，并在 `state_icon` 后使用一个空格。缺失值及其分隔符会消失；当一行中的所有 token 都没有值时，该行会消失。每个布局最多可包含 16 行，每行最多可包含 16 个 token。
+token 会按配置顺序渲染。Herdr 通常使用 ` · ` 分隔相邻值，并在 `state_icon` 后使用一个空格。缺失值及其分隔符会消失；没有任何值的内层数组不会向节点行添加内容。每个布局最多可包含 16 个内层数组，每个数组最多可包含 16 个 token。
 
 也可以用内联样式表定义 token：
 
@@ -310,9 +310,9 @@ rows = [
 
 `fg` 只接受严格的 `#RGB` 或 `#RRGGBB`，`bold` 和 `dim` 接受布尔值。省略字段会保留上下文样式；显式 `false` 会移除对应修饰。样式只作用于当前出现位置。为 `git_status` 设置 `fg` 后，ahead 和 behind 会使用同一种颜色，而不是默认的绿色和红色。token 样式不会改变分隔符或行背景。
 
-`row_gap` 分别控制 Agent 和 Space 面板中条目之间的空白终端行数。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
+树节点会刻意以每个终端行一个节点的方式紧密排列，因此 `row_gap` 仅为兼容性保留，不会在展开的树中添加间距。
 
-在 `rows_by_agent` 下为已知智能体覆盖完整的 Agent 布局：
+在 `rows_by_agent` 下为已知智能体覆盖完整的 Agent 窗格节点布局：
 
 ```toml
 [ui.sidebar.agents]
@@ -329,7 +329,7 @@ claude = [
 ]
 ```
 
-覆盖项会替换 `rows`，而不是扩展它。覆盖项的键是区分大小写的规范智能体 ID，例如 `claude`、`codex` 和 `pi`。不接受 `claude-code` 等检测别名。没有覆盖项的智能体（包括自定义报告的智能体）会使用 `rows`。
+覆盖项会替换 `rows`，而不是扩展它。其内层数组也会以相同方式展平到窗格节点的一行中。覆盖项的键是区分大小写的规范智能体 ID，例如 `claude`、`codex` 和 `pi`。不接受 `claude-code` 等检测别名。没有覆盖项的智能体（包括自定义报告的智能体）会使用 `rows`。
 
 自定义 `$name` token 是动态值，而不是字面文本。先将 token 添加到布局，再通过脚本或插件报告其值：
 
@@ -353,7 +353,7 @@ herdr pane report-metadata <pane_id> \
 
 元数据上报方只提供值；样式由本地侧边栏配置控制。有关限制、清除、顺序和过期值的信息，请参阅 [CLI 参考：报告元数据](/docs/cli-reference/#panes)。
 
-侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图仍使用紧凑布局。
+侧边栏节点设置仅影响展开的桌面树。shell 窗格没有 Agent token 上下文，因此使用解析后的窗格标题或标签。折叠视图和移动视图仍使用紧凑布局。
 
 ## 通知
 

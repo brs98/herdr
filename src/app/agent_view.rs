@@ -5,7 +5,7 @@ use crate::api::schema::{
     AgentViewField, AgentViewFilter, AgentViewSetParams, AgentViewSort, AgentViewSortField,
     AgentViewSortOrder, AgentViewValue,
 };
-use crate::ui::AgentPanelEntry;
+use crate::app::state::AgentPanelEntry;
 
 use super::{AppState, Mode};
 

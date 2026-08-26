@@ -17,9 +17,9 @@ use crate::workspace::WorkspaceGitStatus;
 use super::api_helpers::pane_agent_status;
 use super::state::{
     navigator_display_index_of_row, navigator_display_lines, navigator_first_row_at_or_after,
-    text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
-    NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, ToastKind,
-    ToastNotification, ToastTarget, ViewLayout,
+    text_matches_query, AgentNotificationDelivery, AgentPanelEntry, AppState, Mode, NavigatorRow,
+    NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification,
+    SidebarTreeItemId, ToastKind, ToastNotification, ToastTarget, ViewLayout,
 };
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
@@ -386,16 +386,14 @@ impl AppState {
         let query_kind = navigator_query_kind(&query, self.navigator.state_filter);
         let mut rows = Vec::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
-            let workspace_label = ws.display_name_from(&self.terminals, terminal_runtimes);
-            let activity = workspace_activity_summary(ws, &self.terminals);
-            let workspace_search_text = format!("{workspace_label} {activity}").to_lowercase();
+            let mut workspace_row = self.navigator_workspace_row(ws_idx, terminal_runtimes);
             let workspace_matches = match query_kind {
                 NavigatorQueryKind::Empty => true,
                 NavigatorQueryKind::State(filter) => {
                     let (state, seen) = ws.aggregate_state(&self.terminals);
                     navigator_state_filter_matches(filter, state, seen)
                 }
-                NavigatorQueryKind::Text => navigator_matches(&query, &workspace_search_text),
+                NavigatorQueryKind::Text => navigator_matches(&query, &workspace_row.search_text),
             };
 
             let child_rows =
@@ -406,25 +404,56 @@ impl AppState {
 
             let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
                 || self.navigator.expanded_workspaces.contains(&ws.id);
-            let (state, seen) = ws.aggregate_state(&self.terminals);
-            let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
-            rows.push(NavigatorRow {
-                target: NavigatorTarget::Workspace { ws_idx },
-                depth: 0,
-                label: format!("{workspace_label} ({pane_count})"),
-                meta: activity,
-                status: state,
-                seen,
-                is_current: self.active == Some(ws_idx),
-                is_workspace: true,
-                is_tab: false,
-                expanded,
-                search_text: workspace_search_text,
-                matched: workspace_matches,
-            });
+            workspace_row.expanded = expanded;
+            workspace_row.matched = workspace_matches;
+            rows.push(workspace_row);
             if expanded {
                 rows.extend(child_rows);
             }
+        }
+        rows
+    }
+
+    fn navigator_workspace_row(
+        &self,
+        ws_idx: usize,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> NavigatorRow {
+        let ws = &self.workspaces[ws_idx];
+        let workspace_label = ws.display_name_from(&self.terminals, terminal_runtimes);
+        let activity = workspace_activity_summary(ws, &self.terminals);
+        let search_text = format!("{workspace_label} {activity}").to_lowercase();
+        let (status, seen) = ws.aggregate_state(&self.terminals);
+        let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
+        NavigatorRow {
+            target: NavigatorTarget::Workspace { ws_idx },
+            depth: 0,
+            label: format!("{workspace_label} ({pane_count})"),
+            meta: activity,
+            status,
+            seen,
+            is_current: self.active == Some(ws_idx),
+            is_workspace: true,
+            is_tab: false,
+            expanded: true,
+            search_text,
+            matched: true,
+        }
+    }
+
+    pub(crate) fn sidebar_workspace_tree_rows_from(
+        &self,
+        ws_idx: usize,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        agent_entries: Option<&std::collections::HashMap<crate::layout::PaneId, AgentPanelEntry>>,
+    ) -> Vec<NavigatorRow> {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let mut rows = vec![self.navigator_workspace_row(ws_idx, terminal_runtimes)];
+        for tab_idx in 0..ws.tabs.len() {
+            rows.push(self.navigator_tab_row(ws_idx, tab_idx));
+            rows.extend(self.navigator_pane_rows_for_tab(ws_idx, tab_idx, true, agent_entries));
         }
         rows
     }
@@ -460,7 +489,8 @@ impl AppState {
             tab_row.matched = tab_matches;
             let show_tab_row =
                 multi_tab || (matches!(query_kind, NavigatorQueryKind::Text) && tab_matches);
-            let mut pane_rows = self.navigator_pane_rows_for_tab(ws_idx, tab_idx, show_tab_row);
+            let mut pane_rows =
+                self.navigator_pane_rows_for_tab(ws_idx, tab_idx, show_tab_row, None);
             let filtered_panes = match query_kind {
                 NavigatorQueryKind::Empty => pane_rows,
                 NavigatorQueryKind::State(filter) => pane_rows
@@ -511,7 +541,7 @@ impl AppState {
             meta,
             status,
             seen,
-            is_current: false,
+            is_current: self.active == Some(ws_idx) && ws.active_tab == tab_idx,
             is_workspace: false,
             is_tab: true,
             expanded: true,
@@ -525,6 +555,7 @@ impl AppState {
         ws_idx: usize,
         tab_idx: usize,
         show_tab_row: bool,
+        agent_entries: Option<&std::collections::HashMap<crate::layout::PaneId, AgentPanelEntry>>,
     ) -> Vec<NavigatorRow> {
         let Some(ws) = self.workspaces.get(ws_idx) else {
             return Vec::new();
@@ -538,9 +569,20 @@ impl AppState {
                 continue;
             };
             let terminal = self.terminals.get(&pane.attached_terminal_id);
+            let agent_entry = agent_entries.and_then(|entries| entries.get(&pane_id));
             let pane_number = ws.public_pane_number(pane_id).unwrap_or(0);
-            let label = terminal
-                .and_then(|terminal| terminal.effective_title())
+            let presentation = agent_entry
+                .is_none()
+                .then(|| terminal.map(|terminal| terminal.effective_presentation()))
+                .flatten();
+            let label = agent_entry
+                .and_then(|entry| entry.pane_label.clone())
+                .or_else(|| {
+                    presentation
+                        .as_ref()
+                        .and_then(|presentation| presentation.title.clone())
+                })
+                .or_else(|| agent_entry.and_then(|entry| entry.agent_label.clone()))
                 .or_else(|| {
                     terminal
                         .and_then(|terminal| terminal.manual_label.as_deref().map(str::to_string))
@@ -556,21 +598,49 @@ impl AppState {
                     launch_label(terminal.and_then(|terminal| terminal.launch_argv.as_ref()))
                 })
                 .unwrap_or_else(|| format!("pane {pane_number}"));
-            let display_agent = terminal.and_then(|terminal| terminal.effective_display_agent());
-            let agent_label = display_agent.as_deref().or_else(|| {
-                terminal
-                    .and_then(|terminal| terminal.agent_name.as_deref())
-                    .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()))
+            let agent_label = agent_entry
+                .and_then(|entry| entry.agent_label.clone())
+                .or_else(|| {
+                    presentation
+                        .as_ref()
+                        .and_then(|presentation| presentation.display_agent.clone())
+                })
+                .or_else(|| {
+                    terminal.and_then(|terminal| terminal.agent_name.as_deref().map(str::to_string))
+                })
+                .or_else(|| {
+                    terminal
+                        .and_then(|terminal| terminal.effective_agent_label().map(str::to_string))
+                });
+            let state = agent_entry.map_or_else(
+                || {
+                    terminal
+                        .map(|terminal| terminal.state)
+                        .unwrap_or(AgentState::Unknown)
+                },
+                |entry| entry.state,
+            );
+            let status_label = agent_entry
+                .and_then(|entry| {
+                    entry
+                        .state_labels
+                        .get(state_label_text(state, pane.seen))
+                        .cloned()
+                })
+                .or_else(|| {
+                    presentation.as_ref().and_then(|presentation| {
+                        presentation
+                            .state_labels
+                            .get(state_label_text(state, pane.seen))
+                            .cloned()
+                    })
+                });
+            let status = status_label.or_else(|| {
+                agent_label
+                    .as_ref()
+                    .map(|_| state_label_text(state, pane.seen).to_string())
             });
-            let state = terminal
-                .map(|terminal| terminal.state)
-                .unwrap_or(AgentState::Unknown);
-            let status_label = terminal
-                .map(|terminal| terminal.effective_presentation().state_labels)
-                .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
-            let status = status_label
-                .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
-            let meta = match (agent_label, status.as_deref()) {
+            let meta = match (agent_label.as_deref(), status.as_deref()) {
                 (Some(agent_label), Some(status)) => format!("{agent_label} · {status}"),
                 (Some(agent_label), None) => agent_label.to_string(),
                 (None, _) => "shell".to_string(),
@@ -837,6 +907,328 @@ impl AppState {
                 false
             }
         }
+    }
+
+    pub(crate) fn sidebar_tree_item_id(
+        &self,
+        target: NavigatorTarget,
+    ) -> Option<SidebarTreeItemId> {
+        match target {
+            NavigatorTarget::Workspace { ws_idx } => self
+                .workspaces
+                .get(ws_idx)
+                .map(|workspace| SidebarTreeItemId::Workspace(workspace.id.clone())),
+            NavigatorTarget::Tab { ws_idx, tab_idx } => {
+                let workspace = self.workspaces.get(ws_idx)?;
+                let tab_number = workspace.tabs.get(tab_idx)?.number;
+                Some(SidebarTreeItemId::Tab {
+                    workspace_id: workspace.id.clone(),
+                    tab_number,
+                })
+            }
+            NavigatorTarget::Pane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+            } => {
+                let workspace = self.workspaces.get(ws_idx)?;
+                let tab_number = workspace.tabs.get(tab_idx)?.number;
+                Some(SidebarTreeItemId::Pane {
+                    workspace_id: workspace.id.clone(),
+                    tab_number,
+                    pane_id,
+                })
+            }
+        }
+    }
+
+    pub(crate) fn open_sidebar_tree_navigation_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        self.sidebar_collapsed = false;
+        self.sidebar_tree_navigation.query.clear();
+        self.sidebar_tree_navigation.search_focused = false;
+        self.sidebar_tree_navigation.search_origin = None;
+        self.mode = Mode::Navigate;
+
+        let rows = crate::ui::sidebar_tree_rows_from(self, terminal_runtimes);
+        self.sidebar_tree_navigation.selected = rows
+            .iter()
+            .position(|row| matches!(row.target, NavigatorTarget::Pane { .. }) && row.is_current)
+            .or_else(|| rows.iter().position(|row| row.is_current))
+            .unwrap_or(0);
+        self.set_sidebar_tree_selection_for_rows(&rows, self.sidebar_tree_navigation.selected);
+        self.ensure_sidebar_tree_selection_visible_from(terminal_runtimes);
+    }
+
+    pub(crate) fn sidebar_tree_selected_target_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> Option<NavigatorTarget> {
+        let rows = crate::ui::sidebar_tree_rows_from(self, terminal_runtimes);
+        rows.get(self.sidebar_tree_selected_index_in_rows(&rows))
+            .map(|row| row.target)
+    }
+
+    pub(crate) fn sidebar_tree_selected_workspace_index(&self) -> Option<usize> {
+        let workspace_id = match self.sidebar_tree_navigation.selected_node.as_ref()? {
+            SidebarTreeItemId::Workspace(workspace_id)
+            | SidebarTreeItemId::Tab { workspace_id, .. }
+            | SidebarTreeItemId::Pane { workspace_id, .. } => workspace_id,
+        };
+        self.workspaces
+            .iter()
+            .position(|workspace| workspace.id == *workspace_id)
+    }
+
+    pub(crate) fn move_sidebar_tree_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        delta: isize,
+    ) {
+        let rows = crate::ui::sidebar_tree_rows_from(self, terminal_runtimes);
+        if rows.is_empty() {
+            self.sidebar_tree_navigation.selected = 0;
+            self.sidebar_tree_navigation.selected_node = None;
+            return;
+        }
+        let selected = self
+            .sidebar_tree_selected_index_in_rows(&rows)
+            .saturating_add_signed(delta)
+            .min(rows.len() - 1);
+        self.set_sidebar_tree_selection_for_rows(&rows, selected);
+        self.ensure_sidebar_tree_selection_visible_for_rows(&rows);
+    }
+
+    pub(crate) fn move_sidebar_tree_selection_to_edge_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        end: bool,
+    ) {
+        let rows = crate::ui::sidebar_tree_rows_from(self, terminal_runtimes);
+        let selected = if end { rows.len().saturating_sub(1) } else { 0 };
+        self.set_sidebar_tree_selection_for_rows(&rows, selected);
+        self.ensure_sidebar_tree_selection_visible_for_rows(&rows);
+    }
+
+    pub(crate) fn collapse_sidebar_tree_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let rows = crate::ui::sidebar_tree_rows_from(self, terminal_runtimes);
+        let selected = self.sidebar_tree_selected_index_in_rows(&rows);
+        let Some(row) = rows.get(selected) else {
+            return;
+        };
+
+        let has_visible_child = rows
+            .get(selected + 1)
+            .is_some_and(|next| next.depth > row.depth);
+        if self.sidebar_tree_navigation.query.trim().is_empty() && has_visible_child {
+            if let Some(node_id) = self.sidebar_tree_item_id(row.target) {
+                self.sidebar_tree_navigation.collapsed_nodes.insert(node_id);
+                self.ensure_sidebar_tree_selection_visible_from(terminal_runtimes);
+                return;
+            }
+        }
+
+        if let Some(parent_idx) = rows[..selected]
+            .iter()
+            .rposition(|candidate| candidate.depth < row.depth)
+        {
+            self.set_sidebar_tree_selection_for_rows(&rows, parent_idx);
+            self.ensure_sidebar_tree_selection_visible_for_rows(&rows);
+        }
+    }
+
+    pub(crate) fn expand_sidebar_tree_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let rows = crate::ui::sidebar_tree_rows_from(self, terminal_runtimes);
+        let selected = self.sidebar_tree_selected_index_in_rows(&rows);
+        let Some(row) = rows.get(selected) else {
+            return;
+        };
+
+        if self.sidebar_tree_navigation.query.trim().is_empty() {
+            if let Some(node_id) = self.sidebar_tree_item_id(row.target) {
+                if self
+                    .sidebar_tree_navigation
+                    .collapsed_nodes
+                    .remove(&node_id)
+                {
+                    self.ensure_sidebar_tree_selection_visible_from(terminal_runtimes);
+                    return;
+                }
+            }
+        }
+
+        if rows
+            .get(selected + 1)
+            .is_some_and(|next| next.depth > row.depth)
+        {
+            self.set_sidebar_tree_selection_for_rows(&rows, selected + 1);
+            self.ensure_sidebar_tree_selection_visible_for_rows(&rows);
+        }
+    }
+
+    pub(crate) fn toggle_sidebar_tree_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let Some(target) = self.sidebar_tree_selected_target_from(terminal_runtimes) else {
+            return;
+        };
+        if matches!(target, NavigatorTarget::Pane { .. })
+            || !self.sidebar_tree_navigation.query.trim().is_empty()
+        {
+            return;
+        }
+        let Some(node_id) = self.sidebar_tree_item_id(target) else {
+            return;
+        };
+        if !self
+            .sidebar_tree_navigation
+            .collapsed_nodes
+            .remove(&node_id)
+        {
+            self.sidebar_tree_navigation.collapsed_nodes.insert(node_id);
+        }
+        self.ensure_sidebar_tree_selection_visible_from(terminal_runtimes);
+    }
+
+    pub(crate) fn update_sidebar_tree_query_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        update: impl FnOnce(&mut String),
+    ) {
+        let previous_item = self
+            .sidebar_tree_selected_target_from(terminal_runtimes)
+            .and_then(|target| self.sidebar_tree_item_id(target));
+        update(&mut self.sidebar_tree_navigation.query);
+        let rows = crate::ui::sidebar_tree_rows_from(self, terminal_runtimes);
+        let selected = if !self.sidebar_tree_navigation.query.trim().is_empty() {
+            rows.iter().position(|row| row.matched).unwrap_or(0)
+        } else {
+            self.sidebar_tree_navigation
+                .search_focused
+                .then_some(self.sidebar_tree_navigation.search_origin.as_ref())
+                .flatten()
+                .or(previous_item.as_ref())
+                .and_then(|item| {
+                    rows.iter().position(|row| {
+                        self.sidebar_tree_item_id(row.target).as_ref() == Some(item)
+                    })
+                })
+                .unwrap_or_else(|| {
+                    self.sidebar_tree_navigation
+                        .selected
+                        .min(rows.len().saturating_sub(1))
+                })
+        };
+        self.set_sidebar_tree_selection_for_rows(&rows, selected);
+        self.ensure_sidebar_tree_selection_visible_for_rows(&rows);
+    }
+
+    pub(crate) fn ensure_sidebar_tree_selection_visible_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let rows = crate::ui::sidebar_tree_rows_from(self, terminal_runtimes);
+        self.reconcile_sidebar_tree_selection_for_rows(&rows);
+        self.ensure_sidebar_tree_selection_visible_for_rows(&rows);
+    }
+
+    pub(crate) fn reconcile_sidebar_tree_selection_for_rows(&mut self, rows: &[NavigatorRow]) {
+        let selected = self.sidebar_tree_selected_index_in_rows(rows);
+        self.set_sidebar_tree_selection_for_rows(rows, selected);
+    }
+
+    fn sidebar_tree_selected_index_in_rows(&self, rows: &[NavigatorRow]) -> usize {
+        self.sidebar_tree_navigation
+            .selected_node
+            .as_ref()
+            .and_then(|selected_node| {
+                rows.iter().position(|row| {
+                    self.sidebar_tree_item_id(row.target).as_ref() == Some(selected_node)
+                })
+                .or_else(|| match selected_node {
+                    SidebarTreeItemId::Pane {
+                        workspace_id,
+                        tab_number,
+                        ..
+                    } => rows.iter().position(|row| {
+                        matches!(
+                            self.sidebar_tree_item_id(row.target),
+                            Some(SidebarTreeItemId::Tab {
+                                workspace_id: ref candidate_workspace,
+                                tab_number: candidate_tab,
+                            }) if candidate_workspace == workspace_id && candidate_tab == *tab_number
+                        )
+                    }),
+                    SidebarTreeItemId::Workspace(_) | SidebarTreeItemId::Tab { .. } => None,
+                })
+                .or_else(|| {
+                    let workspace_id = match selected_node {
+                        SidebarTreeItemId::Workspace(workspace_id)
+                        | SidebarTreeItemId::Tab { workspace_id, .. }
+                        | SidebarTreeItemId::Pane { workspace_id, .. } => workspace_id,
+                    };
+                    rows.iter().position(|row| {
+                        matches!(
+                            self.sidebar_tree_item_id(row.target),
+                            Some(SidebarTreeItemId::Workspace(ref candidate))
+                                if candidate == workspace_id
+                        )
+                    })
+                })
+            })
+            .unwrap_or_else(|| {
+                rows.iter()
+                    .position(|row| {
+                        matches!(
+                            row.target,
+                            NavigatorTarget::Workspace { ws_idx } if ws_idx == self.selected
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        self.sidebar_tree_navigation
+                            .selected
+                            .min(rows.len().saturating_sub(1))
+                    })
+            })
+    }
+
+    fn set_sidebar_tree_selection_for_rows(&mut self, rows: &[NavigatorRow], selected: usize) {
+        self.sidebar_tree_navigation.selected = selected.min(rows.len().saturating_sub(1));
+        self.sidebar_tree_navigation.selected_node = rows
+            .get(self.sidebar_tree_navigation.selected)
+            .and_then(|row| self.sidebar_tree_item_id(row.target));
+    }
+
+    fn ensure_sidebar_tree_selection_visible_for_rows(&mut self, rows: &[NavigatorRow]) {
+        if self.sidebar_collapsed || self.view.layout == ViewLayout::Mobile {
+            return;
+        }
+        let viewport =
+            crate::ui::sidebar_tree_body_rect(self.view.sidebar_rect, false).height as usize;
+        if viewport == 0 {
+            return;
+        }
+        let selected = self
+            .sidebar_tree_navigation
+            .selected
+            .min(rows.len().saturating_sub(1));
+        if selected < self.sidebar_tree_scroll {
+            self.sidebar_tree_scroll = selected;
+        } else if selected >= self.sidebar_tree_scroll.saturating_add(viewport) {
+            self.sidebar_tree_scroll = selected.saturating_add(1).saturating_sub(viewport);
+        }
+        self.sidebar_tree_scroll = self
+            .sidebar_tree_scroll
+            .min(rows.len().saturating_sub(viewport));
     }
 }
 
@@ -1185,50 +1577,22 @@ impl AppState {
             return;
         }
 
-        let entries = crate::ui::workspace_list_entries(self);
-        let Some(target_entry_idx) = entries.iter().position(|entry| {
-            matches!(
-                entry,
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == idx
-            )
-        }) else {
+        let rows = crate::ui::sidebar_tree_rows(self);
+        let Some(target_row_idx) = rows.iter().position(
+            |row| matches!(row.target, NavigatorTarget::Workspace { ws_idx } if ws_idx == idx),
+        ) else {
             return;
         };
-
-        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
-            self,
-            self.view.sidebar_rect,
-            self.workspace_scroll,
-        );
-        let mut cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-        if cards.iter().any(|card| card.ws_idx == idx) {
-            return;
+        let viewport =
+            crate::ui::sidebar_tree_body_rect(self.view.sidebar_rect, false).height as usize;
+        if target_row_idx < self.sidebar_tree_scroll {
+            self.sidebar_tree_scroll = target_row_idx;
+        } else if target_row_idx >= self.sidebar_tree_scroll.saturating_add(viewport) {
+            self.sidebar_tree_scroll = target_row_idx.saturating_add(1).saturating_sub(viewport);
         }
-
-        if target_entry_idx < self.workspace_scroll {
-            self.workspace_scroll = target_entry_idx;
-            return;
-        }
-
-        while !cards.iter().any(|card| card.ws_idx == idx) {
-            let previous_scroll = self.workspace_scroll;
-            self.workspace_scroll = self.workspace_scroll.saturating_add(1);
-            if self.workspace_scroll == previous_scroll {
-                break;
-            }
-            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
-                self,
-                self.view.sidebar_rect,
-                self.workspace_scroll,
-            );
-            if self.workspace_scroll == previous_scroll {
-                break;
-            }
-            cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-            if cards.is_empty() {
-                break;
-            }
-        }
+        self.sidebar_tree_scroll = self
+            .sidebar_tree_scroll
+            .min(rows.len().saturating_sub(viewport));
     }
 
     fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
@@ -1558,17 +1922,33 @@ impl AppState {
         if self.sidebar_collapsed {
             return;
         }
-
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
-        self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
-            self,
-            detail_area,
-            self.agent_panel_scroll,
-            idx,
-        );
+        let entries = crate::ui::agent_panel_entries(self);
+        let Some(target) = entries.get(idx) else {
+            return;
+        };
+        let rows = crate::ui::sidebar_tree_rows(self);
+        let Some(target_row_idx) = rows.iter().position(|row| {
+            matches!(
+                row.target,
+                NavigatorTarget::Pane {
+                    ws_idx,
+                    pane_id,
+                    ..
+                } if ws_idx == target.ws_idx && pane_id == target.pane_id
+            )
+        }) else {
+            return;
+        };
+        let viewport =
+            crate::ui::sidebar_tree_body_rect(self.view.sidebar_rect, false).height as usize;
+        if target_row_idx < self.sidebar_tree_scroll {
+            self.sidebar_tree_scroll = target_row_idx;
+        } else if target_row_idx >= self.sidebar_tree_scroll.saturating_add(viewport) {
+            self.sidebar_tree_scroll = target_row_idx.saturating_add(1).saturating_sub(viewport);
+        }
+        self.sidebar_tree_scroll = self
+            .sidebar_tree_scroll
+            .min(rows.len().saturating_sub(viewport));
     }
 
     pub(crate) fn terminal_ids_for_workspace(
@@ -1712,6 +2092,7 @@ impl AppState {
         if self.workspaces.is_empty() {
             self.active = None;
             self.selected = 0;
+            self.sidebar_tree_scroll = 0;
             self.workspace_scroll = 0;
             self.tab_scroll = 0;
             self.tab_scroll_follow_active = true;
@@ -4341,7 +4722,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_agent_keeps_wrapped_target_visible_in_agent_panel() {
+    fn previous_agent_keeps_wrapped_target_visible_in_sidebar_tree() {
         let mut workspace = Workspace::test_new("one");
         let root = workspace.tabs[0].root_pane;
         for idx in 1..8 {
@@ -4365,7 +4746,7 @@ mod tests {
 
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
-        assert!(state.agent_panel_scroll > 0);
+        assert!(state.sidebar_tree_scroll > 0);
         state.assert_invariants_for_test();
     }
 
@@ -4708,8 +5089,12 @@ mod tests {
         // off-screen: 20 workspaces cannot all fit in 12 rows, so index 1 is
         // hidden at maximum scroll regardless of individual card height.
         state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 30, 12);
-        state.workspace_scroll =
-            crate::ui::normalized_workspace_scroll(&state, state.view.sidebar_rect, usize::MAX / 2);
+        state.sidebar_tree_scroll = crate::ui::sidebar_tree_scroll_metrics(
+            &state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            state.view.sidebar_rect,
+        )
+        .max_offset_from_bottom;
         let cards = crate::ui::compute_workspace_card_areas(&state, state.view.sidebar_rect);
         assert!(cards.iter().all(|card| card.ws_idx != 1));
 

@@ -351,21 +351,21 @@ pub struct KeysConfig {
     pub rename_workspace: BindingConfig,
     /// Close the selected workspace. Default: "prefix+shift+d"
     pub close_workspace: BindingConfig,
-    /// Open the workspace navigation surface. Default: "prefix+w"
+    /// Focus the desktop sidebar session tree. Default: "prefix+w"
     pub workspace_picker: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
     pub goto: BindingConfig,
-    /// Move workspace selection up in navigate mode. Default: "up".
+    /// Move the sidebar tree selection up in navigate mode. Default: "up".
     pub navigate_workspace_up: BindingConfig,
-    /// Move workspace selection down in navigate mode. Default: "down".
+    /// Move the sidebar tree selection down in navigate mode. Default: "down".
     pub navigate_workspace_down: BindingConfig,
-    /// Focus the pane to the left in navigate mode. Default: "h". Left arrow is always an alias.
+    /// Collapse a tree node or move to its parent in navigate mode. Default: "h".
     pub navigate_pane_left: BindingConfig,
-    /// Focus the pane below in navigate mode. Default: "j".
+    /// Move the sidebar tree selection down in navigate mode. Default: "j".
     pub navigate_pane_down: BindingConfig,
-    /// Focus the pane above in navigate mode. Default: "k".
+    /// Move the sidebar tree selection up in navigate mode. Default: "k".
     pub navigate_pane_up: BindingConfig,
-    /// Focus the pane to the right in navigate mode. Default: "l". Right arrow is always an alias.
+    /// Expand a tree node or move to its first child in navigate mode. Default: "l".
     pub navigate_pane_right: BindingConfig,
     /// Detach from server/client mode, or exit --no-session mode. Default: "prefix+q".
     pub detach: BindingConfig,
@@ -890,7 +890,8 @@ pub struct UiConfig {
     pub tab_bar_right: Vec<TabBarRightEntryConfig>,
     /// Text inserted between visible right-side tab bar entries. Default: one space.
     pub tab_bar_right_separator: String,
-    /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
+    /// Agent cycling and compact-list ordering. The expanded session tree remains hierarchical.
+    /// Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Retired setting that Herdr wrote before the workspace filter was removed.
     #[serde(rename = "agent_panel_scope")]

@@ -759,9 +759,34 @@ pub enum ViewLayout {
     Mobile,
 }
 
+pub(crate) struct AgentPanelEntry {
+    pub ws_idx: usize,
+    pub tab_idx: usize,
+    pub pane_id: PaneId,
+    pub primary_label: String,
+    pub primary_tab_label: Option<String>,
+    pub pane_label: Option<String>,
+    pub terminal_title: Option<String>,
+    pub terminal_title_stripped: Option<String>,
+    pub agent_label: Option<String>,
+    pub agent_kind_label: Option<String>,
+    pub agent: Option<crate::detect::Agent>,
+    pub state: AgentState,
+    pub seen: bool,
+    pub last_agent_state_change_seq: Option<u64>,
+    pub state_labels: std::collections::HashMap<String, String>,
+    pub tokens: std::collections::HashMap<String, String>,
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
+    /// Whether the sidebar tree caches below were populated by `compute_view`.
+    /// An empty row list is a valid computed result when a search has no matches.
+    pub(crate) sidebar_tree_computed: bool,
+    pub(crate) sidebar_tree_rows: Vec<NavigatorRow>,
+    pub(crate) sidebar_tree_agent_entries: std::collections::HashMap<PaneId, AgentPanelEntry>,
+    pub sidebar_tree_row_areas: Vec<SidebarTreeRowArea>,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -774,6 +799,14 @@ pub struct ViewState {
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarTreeRowArea {
+    pub row_idx: usize,
+    pub target: NavigatorTarget,
+    pub rect: Rect,
+    pub disclosure_rect: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -832,7 +865,7 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavigatorTarget {
     Workspace {
         ws_idx: usize,
@@ -921,6 +954,34 @@ pub(crate) struct NavigatorState {
     pub search_focused: bool,
     pub state_filter: Option<NavigatorStateFilter>,
     pub expanded_workspaces: std::collections::HashSet<String>,
+}
+
+/// Client-local keyboard interaction state for the expanded sidebar tree.
+///
+/// The selected row and expansion/search preferences are presentation state;
+/// they are never persisted into the workspace/tab/pane session model.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SidebarTreeNavigationState {
+    pub selected: usize,
+    pub selected_node: Option<SidebarTreeItemId>,
+    pub query: String,
+    pub search_focused: bool,
+    pub search_origin: Option<SidebarTreeItemId>,
+    pub collapsed_nodes: std::collections::HashSet<SidebarTreeItemId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum SidebarTreeItemId {
+    Workspace(String),
+    Tab {
+        workspace_id: String,
+        tab_number: usize,
+    },
+    Pane {
+        workspace_id: String,
+        tab_number: usize,
+        pane_id: PaneId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1100,9 +1161,6 @@ pub(crate) enum DragTarget {
     WorkspaceListScrollbar {
         grab_row_offset: u16,
     },
-    AgentPanelScrollbar {
-        grab_row_offset: u16,
-    },
     PaneSplit {
         path: Vec<bool>,
         direction: Direction,
@@ -1123,7 +1181,6 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
-    SidebarSectionDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -1373,7 +1430,9 @@ pub struct AppState {
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
+    pub(crate) sidebar_tree_navigation: SidebarTreeNavigationState,
     pub copy_mode: Option<CopyModeState>,
+    pub sidebar_tree_scroll: usize,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
     pub tab_scroll: usize,
@@ -1735,7 +1794,9 @@ impl AppState {
             product_announcement: None,
             keybind_help: KeybindHelpState::default(),
             navigator: NavigatorState::default(),
+            sidebar_tree_navigation: SidebarTreeNavigationState::default(),
             copy_mode: None,
+            sidebar_tree_scroll: 0,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
             tab_scroll: 0,
@@ -1744,6 +1805,10 @@ impl AppState {
             view: ViewState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
+                sidebar_tree_computed: false,
+                sidebar_tree_rows: Vec::new(),
+                sidebar_tree_agent_entries: std::collections::HashMap::new(),
+                sidebar_tree_row_areas: Vec::new(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),

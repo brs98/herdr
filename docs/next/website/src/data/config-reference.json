@@ -269,7 +269,7 @@
           "key": "keys.workspace_picker",
           "type": "keybinding",
           "default": "\"prefix+w\"",
-          "description": "Open the workspace navigation surface."
+          "description": "Focus the desktop sidebar session tree."
         },
         {
           "key": "keys.goto",
@@ -281,37 +281,37 @@
           "key": "keys.navigate_workspace_up",
           "type": "keybinding",
           "default": "\"up\"",
-          "description": "Move workspace selection up in navigate mode."
+          "description": "Move the sidebar tree selection up in navigate mode."
         },
         {
           "key": "keys.navigate_workspace_down",
           "type": "keybinding",
           "default": "\"down\"",
-          "description": "Move workspace selection down in navigate mode."
+          "description": "Move the sidebar tree selection down in navigate mode."
         },
         {
           "key": "keys.navigate_pane_left",
           "type": "keybinding",
           "default": "\"h\"",
-          "description": "Focus the pane to the left in navigate mode. Left arrow is always an alias."
+          "description": "Collapse a tree node or move to its parent in navigate mode."
         },
         {
           "key": "keys.navigate_pane_down",
           "type": "keybinding",
           "default": "\"j\"",
-          "description": "Focus the pane below in navigate mode."
+          "description": "Move the sidebar tree selection down in navigate mode."
         },
         {
           "key": "keys.navigate_pane_up",
           "type": "keybinding",
           "default": "\"k\"",
-          "description": "Focus the pane above in navigate mode."
+          "description": "Move the sidebar tree selection up in navigate mode."
         },
         {
           "key": "keys.navigate_pane_right",
           "type": "keybinding",
           "default": "\"l\"",
-          "description": "Focus the pane to the right in navigate mode. Right arrow is always an alias."
+          "description": "Expand a tree node or move to its first child in navigate mode."
         },
         {
           "key": "keys.detach",
@@ -757,7 +757,7 @@
           "key": "ui.agent_panel_sort",
           "type": "enum",
           "default": "\"spaces\"",
-          "description": "Agent sidebar ordering. Saved values are \"spaces\" or \"priority\"; \"workspaces\" is accepted as an alias for \"spaces\".",
+          "description": "Agent cycling and compact-list ordering. The expanded session tree remains hierarchical. Saved values are \"spaces\" or \"priority\"; \"workspaces\" is accepted as an alias for \"spaces\".",
           "values": [
             "spaces",
             "priority"
@@ -777,31 +777,31 @@
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",
-          "description": "Blank terminal rows between expanded Agent sidebar entries. Set to 1 to restore the previous spacing."
+          "description": "Retained for configuration compatibility; expanded tree nodes remain one terminal row each."
         },
         {
           "key": "ui.sidebar.agents.rows",
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]",
-          "description": "Default expanded Agent sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
+          "description": "Expanded Agent pane-node content. Inner arrays are flattened onto one tree-node line. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 arrays and 16 tokens per array."
         },
         {
           "key": "ui.sidebar.agents.rows_by_agent",
           "type": "table of token rows",
           "default": "{}",
-          "description": "Complete Agent-row overrides keyed by strict canonical agent id. Agents without an override use ui.sidebar.agents.rows."
+          "description": "Complete Agent pane-node overrides keyed by strict canonical agent id. Inner arrays are flattened onto one tree-node line. Agents without an override use ui.sidebar.agents.rows."
         },
         {
           "key": "ui.sidebar.spaces.row_gap",
           "type": "integer",
           "default": "0",
-          "description": "Blank terminal rows between worktree groups and unrelated top-level Spaces. Worktree parents and their indented children remain packed."
+          "description": "Retained for configuration compatibility; expanded tree nodes remain one terminal row each."
         },
         {
           "key": "ui.sidebar.spaces.rows",
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
-          "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
+          "description": "Expanded workspace-node content. Inner arrays are flattened onto one tree-node line. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 arrays and 16 tokens per array."
         },
         {
           "key": "ui.accent",

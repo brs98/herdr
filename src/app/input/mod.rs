@@ -229,6 +229,19 @@ impl App {
                 self.insert_worktree_open_search_text(text);
                 true
             }
+            Mode::Navigate => {
+                if !self.state.sidebar_tree_navigation.search_focused
+                    || self.state.view.layout != super::state::ViewLayout::Desktop
+                    || self.state.sidebar_collapsed
+                {
+                    return false;
+                }
+                self.state
+                    .update_sidebar_tree_query_from(&self.terminal_runtimes, |query| {
+                        query.extend(text.chars().filter(|ch| !ch.is_control()));
+                    });
+                true
+            }
             Mode::Navigator => {
                 if !self.state.navigator.search_focused {
                     return false;
@@ -717,6 +730,11 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
             .worktree_open
             .as_ref()
             .is_some_and(|open| open.search_focused),
+        Mode::Navigate => {
+            state.view.layout == super::state::ViewLayout::Desktop
+                && !state.sidebar_collapsed
+                && state.sidebar_tree_navigation.search_focused
+        }
         Mode::Navigator => state.navigator.search_focused,
         Mode::KeybindHelp => state.keybind_help.search_focused,
         Mode::Copy => state
@@ -940,6 +958,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paste_routes_to_sidebar_tree_query_only_when_searching() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Navigate;
+
+        app.handle_paste("ignored".into()).await;
+        assert!(app.state.sidebar_tree_navigation.query.is_empty());
+
+        app.state.sidebar_tree_navigation.search_focused = true;
+        app.handle_paste("work\nspace".into()).await;
+
+        assert_eq!(app.state.sidebar_tree_navigation.query, "workspace");
+    }
+
+    #[tokio::test]
     async fn paste_routes_to_new_linked_worktree_input() {
         let mut app = test_app();
         app.state.mode = Mode::NewLinkedWorktree;
@@ -1002,6 +1037,14 @@ mod tests {
         state.navigator.search_focused = false;
         assert!(!modal_paste_target_active(&state));
         state.navigator.search_focused = true;
+        assert!(modal_paste_target_active(&state));
+
+        state.mode = Mode::Navigate;
+        state.view.layout = crate::app::state::ViewLayout::Desktop;
+        state.sidebar_collapsed = false;
+        state.sidebar_tree_navigation.search_focused = false;
+        assert!(!modal_paste_target_active(&state));
+        state.sidebar_tree_navigation.search_focused = true;
         assert!(modal_paste_target_active(&state));
 
         state.mode = Mode::KeybindHelp;

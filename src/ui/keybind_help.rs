@@ -87,30 +87,35 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             help_entry("esc", "back"),
             help_entry(
                 format!(
-                    "{} / {}",
+                    "{} / {} / {} / {}",
                     keybind_label(&kb.navigate.workspace_up),
-                    keybind_label(&kb.navigate.workspace_down)
+                    keybind_label(&kb.navigate.workspace_down),
+                    keybind_label(&kb.navigate.pane_up),
+                    keybind_label(&kb.navigate.pane_down)
                 ),
-                "workspace list",
+                "previous / next tree row",
             ),
             help_entry(
                 format!(
-                    "{} / {} / {} / {} / left / right",
+                    "{} / {} / left / right",
                     keybind_label(&kb.navigate.pane_left),
-                    keybind_label(&kb.navigate.pane_down),
-                    keybind_label(&kb.navigate.pane_up),
                     keybind_label(&kb.navigate.pane_right)
                 ),
-                "move focus",
+                "collapse / expand tree",
             ),
+            help_entry("/", "filter sidebar tree"),
+            help_entry("space", "toggle tree node"),
             help_entry("tab / shift+tab", "cycle pane"),
-            help_entry("enter", "open workspace"),
+            help_entry("enter", "open selected node"),
             help_entry("1..9", "switch workspace"),
         ],
     ));
 
     let workspace_tab = vec![
-        help_entry(keybind_label(&kb.workspace_picker), "workspace navigation"),
+        help_entry(
+            keybind_label(&kb.workspace_picker),
+            "sidebar tree navigation",
+        ),
         help_entry(keybind_label(&kb.goto), "session navigator"),
         help_entry(keybind_label(&kb.new_workspace), "new workspace"),
         help_entry(keybind_label(&kb.new_worktree), "new worktree"),

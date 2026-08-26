@@ -280,7 +280,7 @@ herdr pane report-metadata <pane_id> \
 
 Metadata text is normalized before storage. Herdr trims surrounding whitespace, removes control characters, and caps `--title`, `--display-agent`, each `--state-label`, and token values at 80 characters. Empty normalized token values clear that key.
 
-`--token` patches one named display value; `--clear-token` removes one. Unmentioned tokens remain unchanged. Pane tokens are available to Agent sidebar rows as `$name`; workspace tokens are available to Space rows. TTL applies independently to the token keys updated by that call.
+`--token` patches one named display value; `--clear-token` removes one. Unmentioned tokens remain unchanged. Pane tokens are available to Agent pane-node layouts as `$name`; workspace tokens are available to workspace-node layouts. TTL applies independently to the token keys updated by that call.
 
 `--source` and `--applies-to-source` must be 80 characters or fewer and may contain only ASCII letters, digits, colon, dot, underscore, and hyphen. `--ttl-ms` makes metadata expire automatically and must be between `1` and `86400000` milliseconds. Omit it for metadata that should stay until replaced, cleared, or the pane closes. `--seq` lets Herdr ignore stale reports from the same `--source`; stale reports are accepted by the API but ignored by pane state. A pane or workspace accepts sequenced token reports from at most 32 distinct sources during its lifetime; clearing or expiry does not release those source slots.
 

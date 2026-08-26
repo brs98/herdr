@@ -13,6 +13,7 @@
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
 
 ### Changed
+- The expanded desktop sidebar now uses one session tree showing workspaces, tabs, and shell or Agent panes instead of separate Spaces and Agents panels. `prefix+w` focuses that tree for keyboard movement, collapse/expand, inline filtering, and activation.
 - Desktop tab labels are now centered in their tabs, so the active-tab highlight has symmetric padding.
 - Bumped the client/server protocol version to 20 for pane terminal bell forwarding.
 - Experimental pane graphics now support bounded named layers, acknowledged full-RGBA primary-layer direct file frames on audited local terminals, owned BGRA fallback, exact pixel mouse input, and placement-only resize replay.
@@ -117,7 +118,7 @@
 
 ### Added
 - Added a live-agent CLI facade with named `start`, atomic `prompt`, logical `send-keys`, and server-owned `wait` workflows. Agent startup targets an existing pane without changing topology, validates the requested interactive agent kind and strict agent name, and accepts native arguments after `--`.
-- Added transient declarative Agent view queries through `agent.view.set/clear`; filtered and sorted views now define sidebar, mobile, mouse, and agent-keybind navigation order.
+- Added transient declarative Agent view queries through `agent.view.set/clear`; filtered and sorted views define the compact sidebar rail, mobile list, mouse targets for those projections, and agent-keybind navigation order. The expanded session tree remains a complete hierarchy.
 - Added one-shot plugin `[[startup]]` hooks for restoring plugin-owned state after server startup and live handoff.
 - Added per-token foreground, bold, and dim styling to expanded Space and Agent sidebar row layouts.
 - Added `ui.sidebar_start_collapsed` to launch Herdr with the sidebar collapsed. (#1463)
