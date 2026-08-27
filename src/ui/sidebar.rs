@@ -1381,7 +1381,7 @@ fn render_sidebar_tree(
         };
         let selected = is_navigating && row_area.row_idx == app.sidebar_tree_navigation.selected;
         let background = if selected {
-            Some(p.surface0)
+            Some(p.accent)
         } else if row.is_current {
             Some(p.surface_dim)
         } else {
@@ -1471,6 +1471,12 @@ fn render_sidebar_tree(
                     workspace_group_chevron_rect(&card),
                 );
             }
+        }
+
+        if selected {
+            frame
+                .buffer_mut()
+                .set_style(row_area.rect, Style::default().fg(p.text).bg(p.accent));
         }
     }
 
@@ -4003,6 +4009,77 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 },
             ]
         );
+    }
+
+    fn assert_navigation_tree_focused_row_uses_theme_accent(palette: Palette) {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Navigate;
+        app.palette = palette;
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .expect("pane should have a terminal");
+        app.terminals
+            .get_mut(terminal_id)
+            .expect("terminal should exist")
+            .state = AgentState::Working;
+        app.sidebar_tree_navigation.selected = 2;
+        let area = Rect::new(0, 0, 26, 10);
+        let row_areas = compute_sidebar_tree_row_areas(&app, &TerminalRuntimeRegistry::new(), area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("sidebar should render");
+
+        let buffer = terminal.backend().buffer();
+        let backgrounds = row_areas
+            .iter()
+            .map(|row| {
+                (row.rect.x..row.rect.x + row.rect.width)
+                    .map(|x| buffer[(x, row.rect.y)].bg)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let focused_row = row_areas
+            .get(app.sidebar_tree_navigation.selected)
+            .expect("focused row should be visible");
+        let focused_foregrounds = (focused_row.rect.x..focused_row.rect.x + focused_row.rect.width)
+            .map(|x| buffer[(x, focused_row.rect.y)].fg)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (backgrounds, focused_foregrounds),
+            (
+                row_areas
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| vec![
+                        if index == app.sidebar_tree_navigation.selected {
+                            app.palette.accent
+                        } else {
+                            app.palette.surface_dim
+                        };
+                        row.rect.width as usize
+                    ])
+                    .collect::<Vec<_>>(),
+                vec![app.palette.text; focused_row.rect.width as usize]
+            )
+        );
+    }
+
+    #[test]
+    fn navigation_tree_focused_row_uses_theme_accent_in_terminal_palette() {
+        assert_navigation_tree_focused_row_uses_theme_accent(Palette::terminal());
+    }
+
+    #[test]
+    fn navigation_tree_focused_row_uses_theme_accent_in_light_palette() {
+        assert_navigation_tree_focused_row_uses_theme_accent(Palette::catppuccin_latte());
     }
 
     #[test]
