@@ -596,8 +596,6 @@ impl AppState {
                             || self.sidebar_tree_navigation.query.is_empty()
                         {
                             if let Some(node_id) = self.sidebar_tree_item_id(row_area.target) {
-                                self.sidebar_tree_navigation.selected = row_area.row_idx;
-                                self.sidebar_tree_navigation.selected_node = Some(node_id.clone());
                                 if !self
                                     .sidebar_tree_navigation
                                     .collapsed_nodes

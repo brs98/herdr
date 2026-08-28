@@ -139,7 +139,7 @@ next_tab = ["prefix+n", "ctrl+alt+]"]
 
 可选动作默认不设置。使用 `prefix+` 可获得前缀模式行为；当你确实需要直接快捷键时，请使用显式的修饰组合键。
 
-按键字符串支持普通按键、`ctrl+a`、`shift+n`、`alt+1`、`cmd+k` 等修饰组合键，以及 `enter`、`tab`、`esc`、`left`、`right`、`up`、`down` 等特殊键。也支持 `minus`、`comma`、`ampersand`、`plus`、`backtick` 等命名标点。直接绑定 `n` 这样的普通可打印键并不安全，因为它会拦截输入；除非你有意设置直接绑定，否则请使用 `prefix+n`。`navigate_workspace_*` 和 `navigate_pane_*` 字段仅在 Navigate 模式中生效，可以使用 `j` 或 `k` 等普通按键；它们不得使用 `prefix+`、`esc`、`enter`、`tab`、`shift+tab`、`left`、`right`，也不得使用无修饰键的 `1` 到 `9`。在桌面侧边栏树中，上下绑定与 `navigate_pane_up/down` 用于在可见行之间移动，`navigate_pane_left/right` 与左右方向键用于折叠、展开或在父子节点之间移动。这些快捷键独立于 `focus_pane_down = "prefix+j"` 等通用动作绑定；Navigate 模式打开时，本地导航快捷键优先。Alt、Cmd/Super 以及带修饰键的标点取决于你的终端和 tmux 设置。
+按键字符串支持普通按键、`ctrl+a`、`shift+n`、`alt+1`、`cmd+k` 等修饰组合键，以及 `enter`、`tab`、`esc`、`left`、`right`、`up`、`down` 等特殊键。也支持 `minus`、`comma`、`ampersand`、`plus`、`backtick` 等命名标点。直接绑定 `n` 这样的普通可打印键并不安全，因为它会拦截输入；除非你有意设置直接绑定，否则请使用 `prefix+n`。`navigate_workspace_*` 和 `navigate_pane_*` 字段仅在 Navigate 模式中生效，可以使用 `j` 或 `k` 等普通按键；它们不得使用 `prefix+`、`esc`、`enter`、`tab`、`shift+tab`、`left`、`right`，也不得使用无修饰键的 `1` 到 `9`。在桌面侧边栏树中，上下绑定与 `navigate_pane_up/down` 会在可选择的工作区行、标签页行和窗格行之间移动；`navigate_pane_left/right` 与左右方向键用于折叠、展开或在父子节点之间移动。这些快捷键独立于 `focus_pane_down = "prefix+j"` 等通用动作绑定；Navigate 模式打开时，本地导航快捷键优先。Alt、Cmd/Super 以及带修饰键的标点取决于你的终端和 tmux 设置。
 
 如果你已有旧的自定义按键绑定，并想使用新的默认值，请运行 `herdr config reset-keys`。Herdr 会备份 `config.toml`，移除 `[keys]` 和 `[[keys.command]]`，并在重启或执行 `herdr server reload-config` 后使用内置的 v2 默认值。
 
@@ -152,7 +152,11 @@ next_tab = ["prefix+n", "ctrl+alt+]"]
 switch_tab = "prefix+1..9"
 switch_workspace = "prefix+shift+1..9"
 focus_agent = "prefix+alt+1..9"
+jump_sidebar_item = ["alt+1..9", "alt+0"]
+jump_sidebar_item_prompt = "alt+j"
 ```
+
+侧边栏树只为当前可见的窗格行编号。工作区行和拆分标签页的分组标签不显示编号，但两者仍可通过搜索或方向键导航。标签页行可以在不占用跳转编号的情况下选择、折叠和展开。`jump_sidebar_item` 可直接打开编号 1 至 10（`0` 表示编号 10）。若要跳转到任意编号，请使用 `jump_sidebar_item_prompt`，输入完整编号后按 Enter。折叠树节点或筛选结果变化时，可见窗格会从 1 重新编号。只有一个窗格的标签页会合并为该窗格的一行；拆分后的标签页会在无编号的标签页标签下显示各个带编号的窗格。
 
 旧版 `[keys.indexed]` 表仍会出于兼容性而解析，但新配置应优先使用显式的动作字段。
 
@@ -253,7 +257,7 @@ yellow = "#f9e2af"
 
 ## UI 与侧边栏
 
-侧边栏是 Herdr 的主仪表盘。展开的桌面视图是一棵会话树：工作区包含标签页，标签页包含 shell 或 Agent 窗格。即使工作区只有一个标签页，也会明确显示该标签页。点击任意节点即可聚焦对应的工作区、标签页或窗格。按 `prefix+w` 可用键盘聚焦该树，再使用 `j`/`k`、`h`/`l`、Enter 和 `/` 移动、折叠/展开、激活和就地筛选。在[配置参考](/docs/config-reference/)中搜索 `ui.`，可查看尺寸、折叠模式、鼠标行为、窗格边框和其他显示设置。`ui.agent_panel_sort` 仍控制 Agent 循环切换顺序和折叠后的紧凑栏，但不会改变层级树的顺序。
+侧边栏是 Herdr 的主仪表盘。展开的桌面视图是一棵会话树：工作区包含标签页，标签页包含 shell 或 Agent 窗格。只有一个窗格的标签页会合并为一行；拆分后的标签页会在无编号且可选择的标签页行下显示各个带编号的窗格。点击或选择工作区、标签页或窗格即可聚焦该项。按 `prefix+w` 可用键盘聚焦该树，再使用 `j`/`k`、`h`/`l`、Enter 和 `/` 移动、折叠/展开、激活和就地筛选。在 Navigate 模式中，选中行会使用当前主题的强调色；在 Navigate 模式之外，当前聚焦的窗格会保持相同的强调色背景。在[配置参考](/docs/config-reference/)中搜索 `ui.`，可查看尺寸、折叠模式、鼠标行为、窗格边框和其他显示设置。`ui.agent_panel_sort` 仍控制 Agent 循环切换顺序和折叠后的紧凑栏，但不会改变层级树的顺序。
 
 ### 侧边栏树节点布局
 

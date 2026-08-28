@@ -670,14 +670,16 @@ mod tests {
             tab_rect.y,
         ));
 
-        assert_eq!(app.state.active, Some(1));
-        assert_eq!(app.state.selected, 1);
-        assert_eq!(app.state.workspaces[1].active_tab, logs_tab);
         assert_eq!(
-            app.state.workspaces[1].tabs[logs_tab].layout.focused(),
-            remembered_pane
+            (
+                app.state.active,
+                app.state.selected,
+                app.state.workspaces[1].active_tab,
+                app.state.workspaces[1].focused_pane_id(),
+                app.state.mode,
+            ),
+            (Some(1), 1, logs_tab, Some(remembered_pane), Mode::Terminal,)
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
@@ -686,6 +688,8 @@ mod tests {
         let mut workspace = Workspace::test_new("one");
         let tab_idx = workspace.test_add_tab(Some("logs"));
         let pane_id = workspace.tabs[tab_idx].root_pane;
+        workspace.switch_tab(tab_idx);
+        workspace.test_split(Direction::Horizontal);
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -915,6 +919,8 @@ mod tests {
             ("logs", Agent::Claude),
             ("review", Agent::Codex),
             ("ops", Agent::Gemini),
+            ("deploy", Agent::Pi),
+            ("audit", Agent::Claude),
         ] {
             let tab_idx = ws.test_add_tab(Some(tab_name));
             let pane_id = ws.tabs[tab_idx].root_pane;
@@ -1600,7 +1606,7 @@ mod tests {
         );
         assert_eq!(
             app.state.workspace_drop_target_at_row(2),
-            Some(crate::app::state::WorkspaceDropTarget::Before(0))
+            Some(crate::app::state::WorkspaceDropTarget::Before(1))
         );
         assert_eq!(
             app.state.workspace_drop_target_at_row(3),

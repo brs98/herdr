@@ -362,6 +362,18 @@
           "description": "Focus an agent by index 1-9. Unset by default."
         },
         {
+          "key": "keys.jump_sidebar_item",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Jump to a visible sidebar pane by index 1-10. Unnumbered workspace and tab rows are skipped. Unset by default."
+        },
+        {
+          "key": "keys.jump_sidebar_item_prompt",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Enter a multi-digit sidebar pane number. Unnumbered workspace and tab rows are skipped. Unset by default."
+        },
+        {
           "key": "keys.remote_image_paste",
           "type": "string",
           "default": "\"ctrl+v\"",

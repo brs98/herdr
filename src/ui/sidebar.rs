@@ -516,6 +516,15 @@ pub(crate) fn sidebar_tree_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     )
 }
 
+fn sidebar_tree_gutter_width(row_count: usize, available_width: u16) -> u16 {
+    let digit_width = if row_count == 0 {
+        1
+    } else {
+        row_count.ilog10() as u16 + 1
+    };
+    digit_width.saturating_add(1).min(available_width)
+}
+
 pub(crate) fn sidebar_tree_scroll_metrics(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -583,26 +592,47 @@ pub(crate) fn compute_sidebar_tree_row_areas_from_rows(
     let metrics = sidebar_tree_scroll_metrics_for_row_count(rows.len(), scroll, area);
     let body = sidebar_tree_body_rect(area, should_show_scrollbar(metrics));
     let scroll = scroll.min(metrics.max_offset_from_bottom);
+    let numbered_row_count = rows
+        .iter()
+        .filter(|row| row.is_numbered_jump_target())
+        .count();
+    let gutter_width = sidebar_tree_gutter_width(numbered_row_count, body.width);
+    let mut jump_number = rows[..scroll]
+        .iter()
+        .filter(|row| row.is_numbered_jump_target())
+        .count();
     rows.iter()
         .enumerate()
         .skip(scroll)
         .take(body.height as usize)
         .enumerate()
-        .map(|(visible_idx, (row_idx, row))| SidebarTreeRowArea {
-            row_idx,
-            target: row.target,
-            rect: Rect::new(body.x, body.y + visible_idx as u16, body.width, 1),
-            disclosure_rect: if row.is_workspace || row.is_tab {
-                let prefix_width = display_width(&sidebar_tree_prefix(rows, row_idx)) as u16;
-                let x = body.x.saturating_add(prefix_width);
-                if x < body.x.saturating_add(body.width) {
-                    Rect::new(x, body.y + visible_idx as u16, 1, 1)
+        .map(|(visible_idx, (row_idx, row))| {
+            let row_jump_number = if row.is_numbered_jump_target() {
+                jump_number = jump_number.saturating_add(1);
+                Some(jump_number)
+            } else {
+                None
+            };
+            SidebarTreeRowArea {
+                row_idx,
+                jump_number: row_jump_number,
+                target: row.target,
+                rect: Rect::new(body.x, body.y + visible_idx as u16, body.width, 1),
+                disclosure_rect: if row.is_workspace || row.is_tab {
+                    let prefix_width = display_width(&sidebar_tree_prefix(rows, row_idx)) as u16;
+                    let x = body
+                        .x
+                        .saturating_add(gutter_width)
+                        .saturating_add(prefix_width);
+                    if x < body.x.saturating_add(body.width) {
+                        Rect::new(x, body.y + visible_idx as u16, 1, 1)
+                    } else {
+                        Rect::default()
+                    }
                 } else {
                     Rect::default()
-                }
-            } else {
-                Rect::default()
-            },
+                },
+            }
         })
         .collect()
 }
@@ -1323,7 +1353,15 @@ fn render_sidebar_tree(
     let search_active = is_navigating
         && (app.sidebar_tree_navigation.search_focused
             || !app.sidebar_tree_navigation.query.is_empty());
-    let header = if search_active {
+    let jump_input = is_navigating
+        .then_some(app.sidebar_tree_navigation.jump_input.as_deref())
+        .flatten();
+    let header = if let Some(jump_input) = jump_input {
+        format!(
+            " jump to {}▏",
+            truncate_end(jump_input, content_width.saturating_sub(10) as usize)
+        )
+    } else if search_active {
         let cursor = if app.sidebar_tree_navigation.search_focused {
             "▏"
         } else {
@@ -1343,7 +1381,11 @@ fn render_sidebar_tree(
         Paragraph::new(Span::styled(
             header,
             Style::default()
-                .fg(if search_active { p.accent } else { p.overlay0 })
+                .fg(if search_active || jump_input.is_some() {
+                    p.accent
+                } else {
+                    p.overlay0
+                })
                 .add_modifier(Modifier::BOLD),
         )),
         Rect::new(area.x, area.y, content_width, 1),
@@ -1374,19 +1416,24 @@ fn render_sidebar_tree(
     } else {
         &app.view.sidebar_tree_row_areas
     };
+    let numbered_row_count = rows
+        .iter()
+        .filter(|row| row.is_numbered_jump_target())
+        .count();
+    let gutter_width = row_areas.first().map_or(0, |row_area| {
+        sidebar_tree_gutter_width(numbered_row_count, row_area.rect.width) as usize
+    });
 
     for row_area in row_areas {
         let Some(row) = rows.get(row_area.row_idx) else {
             continue;
         };
-        let selected = is_navigating && row_area.row_idx == app.sidebar_tree_navigation.selected;
-        let background = if selected {
-            Some(p.accent)
-        } else if row.is_current {
-            Some(p.surface_dim)
+        let highlighted = if is_navigating {
+            row_area.row_idx == app.sidebar_tree_navigation.selected
         } else {
-            None
+            row.is_current && matches!(row.target, NavigatorTarget::Pane { .. })
         };
+        let background = highlighted.then_some(p.accent);
         if let Some(background) = background {
             frame
                 .buffer_mut()
@@ -1399,8 +1446,17 @@ fn render_sidebar_tree(
         } else {
             p.surface1
         });
-        let prefix_width = display_width(&prefix).saturating_add(2);
+        let prefix_width = gutter_width
+            .saturating_add(display_width(&prefix))
+            .saturating_add(2);
         let mut spans = vec![
+            Span::styled(
+                row_area.jump_number.map_or_else(
+                    || " ".repeat(gutter_width),
+                    |number| format!("{number:>width$} ", width = gutter_width.saturating_sub(1)),
+                ),
+                Style::default().fg(p.overlay0),
+            ),
             Span::raw(" "),
             Span::styled(prefix, tree_style),
             Span::raw(" "),
@@ -1411,7 +1467,7 @@ fn render_sidebar_tree(
             row,
             agent_entries_by_pane,
             row_area.rect.width as usize - prefix_width.min(row_area.rect.width as usize),
-            selected,
+            highlighted,
         ));
         let mut row_style = background
             .map(|bg| Style::default().bg(bg))
@@ -1473,7 +1529,7 @@ fn render_sidebar_tree(
             }
         }
 
-        if selected {
+        if highlighted {
             frame
                 .buffer_mut()
                 .set_style(row_area.rect, Style::default().fg(p.text).bg(p.accent));
@@ -1514,7 +1570,9 @@ fn render_sidebar_tree(
 
     if is_navigating && area.height > 0 {
         let footer = app.sidebar_footer_rect();
-        let hint = if app.sidebar_tree_navigation.search_focused {
+        let hint = if app.sidebar_tree_navigation.jump_input.is_some() {
+            " type number · enter jump · esc cancel"
+        } else if app.sidebar_tree_navigation.search_focused {
             " type to filter · esc tree"
         } else {
             " ↑↓ move · ←→ tree · enter open · / find"
@@ -2351,7 +2409,69 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_tree_preserves_exact_workspace_tab_pane_order_and_depth() {
+    fn sidebar_tree_condenses_single_pane_tab_to_one_pane_row() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+
+        let rows = sidebar_tree_rows(&app);
+        let shape = rows
+            .iter()
+            .map(|row| (row.target, row.depth, row.is_tab))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            shape,
+            vec![
+                (NavigatorTarget::Workspace { ws_idx: 0 }, 0, false),
+                (
+                    NavigatorTarget::Pane {
+                        ws_idx: 0,
+                        tab_idx: 0,
+                        pane_id,
+                    },
+                    1,
+                    false,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn sidebar_tree_condensed_pane_keeps_custom_tab_name_searchable() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        workspace.tabs[0].set_custom_name("logs".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.mode = Mode::Navigate;
+        app.sidebar_tree_navigation.query = "logs".into();
+
+        let rows = sidebar_tree_rows(&app);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.target, row.matched))
+                .collect::<Vec<_>>(),
+            vec![
+                (NavigatorTarget::Workspace { ws_idx: 0 }, false),
+                (
+                    NavigatorTarget::Pane {
+                        ws_idx: 0,
+                        tab_idx: 0,
+                        pane_id,
+                    },
+                    true,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn sidebar_tree_preserves_exact_workspace_and_condensed_pane_order_and_depth() {
         let mut app = crate::app::state::AppState::test_new();
         let mut main = workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr");
         let main_pane = main.tabs[0].root_pane;
@@ -2390,35 +2510,15 @@ mod tests {
                     true
                 ),
                 (
-                    NavigatorTarget::Tab {
-                        ws_idx: 0,
-                        tab_idx: 0
-                    },
-                    1,
-                    false,
-                    true,
-                    false
-                ),
-                (
                     NavigatorTarget::Pane {
                         ws_idx: 0,
                         tab_idx: 0,
                         pane_id: main_pane
                     },
-                    2,
-                    false,
-                    false,
-                    false,
-                ),
-                (
-                    NavigatorTarget::Tab {
-                        ws_idx: 0,
-                        tab_idx: logs_tab
-                    },
                     1,
                     false,
-                    true,
-                    true
+                    false,
+                    false,
                 ),
                 (
                     NavigatorTarget::Pane {
@@ -2426,7 +2526,7 @@ mod tests {
                         tab_idx: logs_tab,
                         pane_id: logs_pane,
                     },
-                    2,
+                    1,
                     false,
                     false,
                     true,
@@ -2439,22 +2539,12 @@ mod tests {
                     false
                 ),
                 (
-                    NavigatorTarget::Tab {
-                        ws_idx: 1,
-                        tab_idx: 0
-                    },
-                    2,
-                    false,
-                    true,
-                    false
-                ),
-                (
                     NavigatorTarget::Pane {
                         ws_idx: 1,
                         tab_idx: 0,
                         pane_id: issue_pane
                     },
-                    3,
+                    2,
                     false,
                     false,
                     false,
@@ -2467,22 +2557,12 @@ mod tests {
                     false
                 ),
                 (
-                    NavigatorTarget::Tab {
-                        ws_idx: 2,
-                        tab_idx: 0
-                    },
-                    1,
-                    false,
-                    true,
-                    false
-                ),
-                (
                     NavigatorTarget::Pane {
                         ws_idx: 2,
                         tab_idx: 0,
                         pane_id: notes_pane
                     },
-                    2,
+                    1,
                     false,
                     false,
                     false,
@@ -2494,19 +2574,7 @@ mod tests {
                 .enumerate()
                 .map(|(idx, _)| fixed_open_tree_prefix(&rows, idx))
                 .collect::<Vec<_>>(),
-            vec![
-                "",
-                "├──",
-                "│  └──",
-                "├──",
-                "│  └──",
-                "└──",
-                "   └──",
-                "      └──",
-                "",
-                "└──",
-                "   └──",
-            ]
+            vec!["", "├──", "├──", "└──", "   └──", "", "└──"]
         );
     }
 
@@ -2529,7 +2597,7 @@ mod tests {
 
         let rows = sidebar_tree_rows(&app);
 
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].target, NavigatorTarget::Workspace { ws_idx: 0 });
         assert_eq!(rows[0].status, AgentState::Blocked);
     }
@@ -2630,14 +2698,14 @@ mod tests {
         assert_eq!(workspace_style.fg, Some(app.palette.text));
         assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(workspace_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(workspace_style.bg, Some(ratatui::style::Color::Reset));
 
         let agent_x = find_symbol_x(buffer, pane_row, 25, "p");
         let agent_style = buffer[(agent_x, pane_row)].style();
         assert_eq!(agent_style.fg, Some(app.palette.overlay0));
         assert!(agent_style.add_modifier.contains(Modifier::DIM));
         assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(agent_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(agent_style.bg, Some(ratatui::style::Color::Reset));
     }
 
     #[test]
@@ -2704,7 +2772,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert_eq!(active.fg, Some(app.palette.text));
         assert!(active.add_modifier.contains(Modifier::BOLD));
         assert!(!active.add_modifier.contains(Modifier::DIM));
-        assert_eq!(active.bg, Some(app.palette.surface_dim));
+        assert_eq!(active.bg, Some(ratatui::style::Color::Reset));
 
         let inactive = buffer[(find_symbol_x(buffer, second_row, 25, "t"), second_row)].style();
         assert_eq!(inactive.fg, Some(app.palette.subtext0));
@@ -2749,12 +2817,12 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
             assert_eq!(style.fg, Some(ratatui::style::Color::Rgb(0xab, 0xcd, 0xef)));
             assert!(style.add_modifier.contains(Modifier::BOLD));
             assert!(!style.add_modifier.contains(Modifier::DIM));
-            assert_eq!(style.bg, Some(app.palette.surface_dim));
+            assert_eq!(style.bg, Some(ratatui::style::Color::Reset));
         }
         assert_eq!(separator.fg, Some(app.palette.overlay0));
         assert!(separator.add_modifier.contains(Modifier::DIM));
         assert!(!separator.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(separator.bg, Some(app.palette.surface_dim));
+        assert_eq!(separator.bg, Some(ratatui::style::Color::Reset));
     }
 
     #[test]
@@ -2830,6 +2898,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut workspace = Workspace::test_new("very-long-workspace-name");
         let tab_idx = workspace.test_add_tab(Some("logs"));
         let pane_id = workspace.tabs[tab_idx].root_pane;
+        workspace.switch_tab(tab_idx);
+        workspace.test_split(Direction::Horizontal);
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
@@ -2867,8 +2937,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             crate::config::AgentSidebarToken::TerminalTitleStripped,
         ]];
 
-        let area = Rect::new(0, 0, 14, 12);
-        let mut renderer = Terminal::new(TestBackend::new(14, 12)).unwrap();
+        let area = Rect::new(0, 0, 16, 12);
+        let mut renderer = Terminal::new(TestBackend::new(16, 12)).unwrap();
         renderer
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
@@ -2881,7 +2951,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 pane_id,
             },
         );
-        let rendered = row_text(renderer.backend().buffer(), pane_row, 13);
+        let rendered = row_text(renderer.backend().buffer(), pane_row, 15);
 
         assert!(!rendered.contains('⠋'));
         assert!(rendered.contains('修') && rendered.contains('复'));
@@ -4016,7 +4086,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Navigate;
         app.palette = palette;
         app.ensure_test_terminals();
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -4027,14 +4096,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .get_mut(terminal_id)
             .expect("terminal should exist")
             .state = AgentState::Working;
-        app.sidebar_tree_navigation.selected = 2;
+        let runtimes = TerminalRuntimeRegistry::new();
+        app.open_sidebar_tree_navigation_from(&runtimes);
         let area = Rect::new(0, 0, 26, 10);
-        let row_areas = compute_sidebar_tree_row_areas(&app, &TerminalRuntimeRegistry::new(), area);
+        let row_areas = compute_sidebar_tree_row_areas(&app, &runtimes, area);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("test terminal should initialize");
 
         terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .draw(|frame| render_sidebar(&app, &runtimes, frame, area))
             .expect("sidebar should render");
 
         let buffer = terminal.backend().buffer();
@@ -4062,7 +4132,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         if index == app.sidebar_tree_navigation.selected {
                             app.palette.accent
                         } else {
-                            app.palette.surface_dim
+                            ratatui::style::Color::Reset
                         };
                         row.rect.width as usize
                     ])
@@ -4083,9 +4153,195 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn navigation_tree_current_pane_keeps_theme_accent_outside_navigate_mode() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        let pane_id = app.workspaces[0].test_split(Direction::Horizontal);
+        app.workspaces[0].layout.focus_pane(pane_id);
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.palette = Palette::catppuccin_latte();
+        app.ensure_test_terminals();
+        let runtimes = TerminalRuntimeRegistry::new();
+        let area = Rect::new(0, 0, 26, 10);
+        let rows = sidebar_tree_rows_from(&app, &runtimes);
+        let row_areas = compute_sidebar_tree_row_areas(&app, &runtimes, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar(&app, &runtimes, frame, area))
+            .expect("sidebar should render");
+
+        let buffer = terminal.backend().buffer();
+        for row_area in row_areas {
+            let row = &rows[row_area.row_idx];
+            let is_current_pane = matches!(
+                row.target,
+                NavigatorTarget::Pane {
+                    pane_id: row_pane_id,
+                    ..
+                } if row_pane_id == pane_id
+            );
+            let backgrounds = (row_area.rect.x..row_area.rect.x + row_area.rect.width)
+                .map(|x| buffer[(x, row_area.rect.y)].bg)
+                .collect::<Vec<_>>();
+            if is_current_pane {
+                assert!(
+                    backgrounds
+                        .iter()
+                        .all(|background| *background == app.palette.accent),
+                    "current pane should use the accent background"
+                );
+            } else {
+                assert!(
+                    backgrounds
+                        .iter()
+                        .all(|background| *background != app.palette.accent),
+                    "only the current pane should use the accent background"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_tree_cursor_accent_replaces_current_pane_accent_in_navigate_mode() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.workspaces[0].test_split(Direction::Horizontal);
+        app.active = Some(0);
+        app.selected = 0;
+        app.palette = Palette::catppuccin_latte();
+        app.ensure_test_terminals();
+        let runtimes = TerminalRuntimeRegistry::new();
+        app.open_sidebar_tree_navigation_from(&runtimes);
+        let rows = sidebar_tree_rows_from(&app, &runtimes);
+        let tab_index = rows
+            .iter()
+            .position(|row| matches!(row.target, NavigatorTarget::Tab { .. }))
+            .expect("split tab should have a visible row");
+        app.sidebar_tree_navigation.selected = tab_index;
+        app.sidebar_tree_navigation.selected_node =
+            app.sidebar_tree_item_id(rows[tab_index].target);
+        let area = Rect::new(0, 0, 26, 10);
+        let row_areas = compute_sidebar_tree_row_areas(&app, &runtimes, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar(&app, &runtimes, frame, area))
+            .expect("sidebar should render");
+
+        let buffer = terminal.backend().buffer();
+        for row_area in row_areas {
+            let uses_accent = (row_area.rect.x..row_area.rect.x + row_area.rect.width)
+                .all(|x| buffer[(x, row_area.rect.y)].bg == app.palette.accent);
+            assert_eq!(
+                uses_accent,
+                row_area.row_idx == tab_index,
+                "only the navigation cursor row should use the accent background"
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_tree_gutter_numbers_panes_but_not_workspaces() {
+        let mut app = AppState::test_new();
+        app.workspaces = (1..=11)
+            .map(|index| Workspace::test_new(&format!("workspace-{index}")))
+            .collect();
+        app.active = Some(0);
+        app.selected = 0;
+        app.ensure_test_terminals();
+        let area = Rect::new(0, 0, 32, 26);
+        let row_areas = compute_sidebar_tree_row_areas(&app, &TerminalRuntimeRegistry::new(), area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("sidebar should render");
+
+        let buffer = terminal.backend().buffer();
+        let workspace_gutter = (0..3)
+            .map(|x| buffer[(x, row_areas[0].rect.y)].symbol())
+            .collect::<String>();
+        let first_pane_gutter = (0..3)
+            .map(|x| buffer[(x, row_areas[1].rect.y)].symbol())
+            .collect::<String>();
+        let eleventh_jump_gutter = (0..3)
+            .map(|x| buffer[(x, row_areas[21].rect.y)].symbol())
+            .collect::<String>();
+        assert_eq!(
+            (workspace_gutter, first_pane_gutter, eleventh_jump_gutter),
+            ("   ".into(), " 1 ".into(), "11 ".into())
+        );
+    }
+
+    #[test]
+    fn navigation_tree_gutter_numbers_only_panes_in_split_tab() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let area = Rect::new(0, 0, 32, 10);
+        let row_areas = compute_sidebar_tree_row_areas(&app, &TerminalRuntimeRegistry::new(), area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("sidebar should render");
+
+        let buffer = terminal.backend().buffer();
+        let gutters = row_areas
+            .iter()
+            .map(|row| {
+                (0..2)
+                    .map(|x| buffer[(x, row.rect.y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(gutters, ["  ", "  ", "1 ", "2 "]);
+    }
+
+    #[test]
+    fn navigation_tree_jump_prompt_shows_entered_number() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Navigate;
+        app.sidebar_tree_navigation.jump_input = Some("12".into());
+        app.ensure_test_terminals();
+        let area = Rect::new(0, 0, 26, 8);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("sidebar should render");
+
+        assert_eq!(
+            row_text(
+                terminal.backend().buffer(),
+                area.y,
+                area.width.saturating_sub(1)
+            ),
+            " jump to 12▏"
+        );
+    }
+
+    #[test]
     fn sidebar_tree_collapse_hides_only_the_selected_container_subtree() {
         let mut app = AppState::test_new();
-        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let mut first = Workspace::test_new("one");
+        first.test_split(Direction::Horizontal);
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+        app.workspaces = vec![first, second];
         app.active = Some(0);
         app.selected = 0;
         app.ensure_test_terminals();
@@ -4103,14 +4359,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 NavigatorTarget::Workspace { ws_idx: 0 },
                 tab,
                 NavigatorTarget::Workspace { ws_idx: 1 },
-                NavigatorTarget::Tab {
-                    ws_idx: 1,
-                    tab_idx: 0,
-                },
                 NavigatorTarget::Pane {
                     ws_idx: 1,
                     tab_idx: 0,
-                    pane_id: app.workspaces[1].tabs[0].root_pane,
+                    pane_id: second_pane,
                 },
             ]
         );
@@ -4142,13 +4394,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let rows = sidebar_tree_rows(&app);
 
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 2);
         assert_eq!(
             rows.iter().map(|row| row.matched).collect::<Vec<_>>(),
-            vec![false, false, true]
+            vec![false, true]
         );
         assert!(rows[0].expanded);
-        assert!(rows[1].expanded);
         assert!(app
             .sidebar_tree_navigation
             .collapsed_nodes
@@ -4170,7 +4421,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let rows = sidebar_tree_rows(&app);
 
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.matched));
     }
 }

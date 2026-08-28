@@ -761,11 +761,17 @@ fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
 }
 
 fn sidebar_tree_starts_with(frame: &FrameWire, agent_label: &str) -> bool {
+    let Some(agent_index) = agent_label
+        .strip_prefix("agent-")
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+    else {
+        return false;
+    };
     frame_text(frame)
         .lines()
         .skip(1)
-        .find(|line| line.contains("agent-"))
-        .is_some_and(|line| line.contains(agent_label))
+        .find_map(|line| line.split_whitespace().next()?.parse::<usize>().ok())
+        == Some(agent_index)
 }
 
 #[test]
@@ -876,7 +882,7 @@ fn non_foreground_client_render_preserves_sidebar_tree_scroll() {
     let (reached_bottom, setup_frames) = wait_for_frame_matching_with_snapshots(
         &mut setup_client,
         Duration::from_secs(3),
-        |frame| sidebar_tree_starts_with(frame, "agent-11"),
+        |frame| sidebar_tree_starts_with(frame, "agent-05"),
     )
     .expect("setup frame decoding should succeed");
     assert!(
@@ -892,7 +898,7 @@ fn non_foreground_client_render_preserves_sidebar_tree_scroll() {
     let mut probe = connect_raw_client(&client_socket, 106, 40);
     let (started_at_tall_limit, initial_frames) =
         wait_for_frame_matching_with_snapshots(&mut probe, Duration::from_secs(3), |frame| {
-            sidebar_tree_starts_with(frame, "agent-03")
+            sidebar_tree_starts_with(frame, "agent-01")
         })
         .expect("initial probe frame decoding should succeed");
     assert!(
@@ -905,7 +911,7 @@ fn non_foreground_client_render_preserves_sidebar_tree_scroll() {
     send_client_input(&mut probe, &wheel_down.repeat(3));
     let (scrolled, probe_frames) =
         wait_for_frame_matching_with_snapshots(&mut probe, Duration::from_secs(3), |frame| {
-            sidebar_tree_starts_with(frame, "agent-04")
+            sidebar_tree_starts_with(frame, "agent-02")
         })
         .expect("probe frame decoding should succeed");
     assert!(

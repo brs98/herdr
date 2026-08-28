@@ -804,6 +804,7 @@ pub struct ViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidebarTreeRowArea {
     pub row_idx: usize,
+    pub jump_number: Option<usize>,
     pub target: NavigatorTarget,
     pub rect: Rect,
     pub disclosure_rect: Rect,
@@ -900,6 +901,21 @@ pub(crate) struct NavigatorRow {
     pub matched: bool,
 }
 
+impl NavigatorRow {
+    pub(crate) fn is_sidebar_tree_selectable(&self) -> bool {
+        matches!(
+            self.target,
+            NavigatorTarget::Workspace { .. }
+                | NavigatorTarget::Tab { .. }
+                | NavigatorTarget::Pane { .. }
+        )
+    }
+
+    pub(crate) fn is_numbered_jump_target(&self) -> bool {
+        matches!(self.target, NavigatorTarget::Pane { .. })
+    }
+}
+
 /// One rendered line in the navigator body. Spacer lines separate workspace
 /// groups visually and are not selectable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -967,6 +983,7 @@ pub(crate) struct SidebarTreeNavigationState {
     pub query: String,
     pub search_focused: bool,
     pub search_origin: Option<SidebarTreeItemId>,
+    pub jump_input: Option<String>,
     pub collapsed_nodes: std::collections::HashSet<SidebarTreeItemId>,
 }
 

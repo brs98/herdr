@@ -191,6 +191,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # previous_agent = ""     # optional, unset by default
 # next_agent = ""         # optional, unset by default
 # focus_agent = ""        # optional indexed binding, e.g. "prefix+alt+1..9"
+# jump_sidebar_item = ""  # optional indexed binding, e.g. ["alt+1..9", "alt+0"]
+# jump_sidebar_item_prompt = "" # optional multi-digit jump prompt, e.g. "alt+j"
 # remote_image_paste = "ctrl+v" # only active in herdr --remote; empty disables raw-key image paste
 # new_tab = "prefix+c"
 # rename_tab = "prefix+shift+t"
@@ -244,7 +246,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # height = "80%"
 
 # Legacy indexed shortcut config is still parsed for compatibility.
-# Prefer switch_tab, switch_workspace, and focus_agent for new configs.
+# Prefer switch_tab, switch_workspace, focus_agent, and jump_sidebar_item for new configs.
 # [keys.indexed]
 # tabs = ""       # e.g. "ctrl" makes ctrl+1..9 switch tabs directly
 # workspaces = "" # e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces directly

@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_sidebar_workspace_nodes_show_state_name_and_branch_without_numbers() {
+    fn expanded_sidebar_workspace_nodes_show_state_name_and_branch_without_number() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("one");
         let repo = temp_git_repo("main");
@@ -1162,7 +1162,7 @@ mod tests {
 
         assert!(workspace_line.contains("· one"));
         assert!(workspace_line.contains("main"));
-        assert!(!workspace_line.contains("1 one"));
+        assert!(workspace_line.starts_with("   "));
         assert_eq!(card.height, 1);
 
         std::fs::remove_dir_all(repo).ok();
