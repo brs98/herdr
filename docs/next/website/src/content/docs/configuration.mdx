@@ -147,7 +147,7 @@ resize_pane_up = "ctrl+shift+alt+up"
 resize_pane_right = "ctrl+shift+alt+right"
 ```
 
-Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. The `navigate_workspace_*` and `navigate_pane_*` fields are navigate-mode-only and may use plain keys such as `j` or `k`; they must not use `prefix+`, `esc`, `enter`, `tab`, `shift+tab`, `left`, `right`, or unmodified `1` through `9`. Left and right arrows are permanent aliases for pane-left and pane-right navigation. These navigate-mode shortcuts are independent from general action bindings such as `focus_pane_down = "prefix+j"`; when both use the same key, the navigate-mode shortcut wins while navigate mode is open. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
+Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. The `navigate_workspace_*` and `navigate_pane_*` fields are navigate-mode-only and may use plain keys such as `j` or `k`; they must not use `prefix+`, `esc`, `enter`, `tab`, `shift+tab`, `left`, `right`, or unmodified `1` through `9`. In the desktop sidebar tree, the up/down bindings and `navigate_pane_up/down` move between selectable workspace, tab, and pane rows, while `navigate_pane_left/right` and the left/right arrows collapse, expand, or move between parent and child nodes. These shortcuts are independent from general action bindings such as `focus_pane_down = "prefix+j"`; when both use the same key, the navigate-mode shortcut wins while Navigate mode is open. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
 
 If you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. Herdr backs up `config.toml`, removes `[keys]` and `[[keys.command]]`, and uses built-in v2 defaults after restart or `herdr server reload-config`.
 
@@ -160,7 +160,17 @@ Indexed keybindings use `1..9` in normal keybinding fields:
 switch_tab = "prefix+1..9"
 switch_workspace = "prefix+shift+1..9"
 focus_agent = "prefix+alt+1..9"
+jump_sidebar_item = ["alt+1..9", "alt+0"]
+jump_sidebar_item_prompt = "alt+j"
 ```
+
+The sidebar tree numbers every visible pane. Workspace rows and split-tab group labels stay
+unnumbered, but both remain reachable with search or arrow navigation. Tab rows can be activated,
+collapsed, and expanded without consuming a jump number. `jump_sidebar_item` opens
+numbered targets 1 through 10 directly (`0` means target 10). To jump to any numbered
+target, use `jump_sidebar_item_prompt`, type the full number, and press Enter. Collapse
+and filtering renumber the visible panes from 1. A tab with one pane is condensed into that
+pane's single numbered row; split tabs keep an unnumbered tab label above their numbered panes.
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
 
@@ -265,7 +275,7 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
+The sidebar is the main Herdr dashboard. Its expanded desktop view is one session tree: workspaces contain tabs, and tabs contain shell or Agent panes. A tab with one pane is condensed into one pane row; a split tab shows an unnumbered, selectable tab row with each numbered pane beneath it. Clicking or selecting a workspace, tab, or pane focuses it. Press `prefix+w` to focus the tree from the keyboard, then use `j`/`k`, `h`/`l`, Enter, and `/` for movement, collapse/expand, activation, and inline filtering. In Navigate mode, the selected row uses the active theme accent; outside Navigate mode, the currently focused pane keeps that accent background. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, mouse behavior, pane borders, and other presentation settings. `ui.agent_panel_sort` still controls Agent cycling and the compact collapsed rail; it does not reorder the hierarchical tree.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
@@ -298,9 +308,9 @@ status_indicators = "symbols"
 
 The symbols are static, so this option does not enable spinner animation.
 
-### Sidebar row layouts
+### Sidebar tree node layouts
 
-The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:
+The existing Space and Agent layout settings style workspace nodes and detected-Agent pane nodes in the tree. Every tree node occupies one terminal line. Herdr resolves each inner array in `rows`, then flattens its nonempty values onto that node's line in order. These are the complete default layouts:
 
 ```toml
 [ui.sidebar.agents]
@@ -339,7 +349,7 @@ Space rows accept these built-in tokens:
 - `git_status` — Git ahead and behind counts when nonzero.
 - `$name` — custom workspace metadata named `name`.
 
-Tokens render in their configured order. Herdr normally separates adjacent values with ` · ` and uses a single space after `state_icon`. Missing values and their separators disappear; a row disappears when none of its tokens have a value. Each layout may contain at most 16 rows, with at most 16 tokens in each row.
+Tokens render in their configured order. Herdr normally separates adjacent values with ` · ` and uses a single space after `state_icon`. Missing values and their separators disappear; inner arrays with no values contribute nothing to the node line. Each layout may contain at most 16 inner arrays, with at most 16 tokens in each array.
 
 A token entry can also be an inline style table:
 
@@ -353,9 +363,9 @@ rows = [
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
-`row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+Tree nodes are deliberately packed one per terminal row, so `row_gap` is retained as a compatibility setting but does not add spacing in the expanded tree.
 
-Override the complete Agent layout for a known agent under `rows_by_agent`:
+Override the complete Agent pane-node layout for a known agent under `rows_by_agent`:
 
 ```toml
 [ui.sidebar.agents]
@@ -372,7 +382,7 @@ claude = [
 ]
 ```
 
-An override replaces `rows`; it does not extend it. Override keys are case-sensitive canonical agent IDs such as `claude`, `codex`, and `pi`. Detection aliases such as `claude-code` are not accepted. Agents without an override, including custom reported agents, use `rows`.
+An override replaces `rows`; it does not extend it. Its inner arrays are flattened onto the pane node in the same way. Override keys are case-sensitive canonical agent IDs such as `claude`, `codex`, and `pi`. Detection aliases such as `claude-code` are not accepted. Agents without an override, including custom reported agents, use `rows`.
 
 Custom `$name` tokens are dynamic values, not literal text. Add the token to a layout, then report its value from a script or plugin:
 
@@ -396,7 +406,7 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
-Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
+Sidebar node settings affect only the expanded desktop tree. Shell panes use their resolved pane title or label because they have no Agent token context. Collapsed and mobile views keep their compact layouts.
 
 ## Notifications
 

@@ -87,30 +87,35 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             help_entry("esc", "back"),
             help_entry(
                 format!(
-                    "{} / {}",
+                    "{} / {} / {} / {}",
                     keybind_label(&kb.navigate.workspace_up),
-                    keybind_label(&kb.navigate.workspace_down)
+                    keybind_label(&kb.navigate.workspace_down),
+                    keybind_label(&kb.navigate.pane_up),
+                    keybind_label(&kb.navigate.pane_down)
                 ),
-                "workspace list",
+                "previous / next tree row",
             ),
             help_entry(
                 format!(
-                    "{} / {} / {} / {} / left / right",
+                    "{} / {} / left / right",
                     keybind_label(&kb.navigate.pane_left),
-                    keybind_label(&kb.navigate.pane_down),
-                    keybind_label(&kb.navigate.pane_up),
                     keybind_label(&kb.navigate.pane_right)
                 ),
-                "move focus",
+                "collapse / expand tree",
             ),
+            help_entry("/", "filter sidebar tree"),
+            help_entry("space", "toggle tree node"),
             help_entry("tab / shift+tab", "cycle pane"),
-            help_entry("enter", "open workspace"),
+            help_entry("enter", "open selected node"),
             help_entry("1..9", "switch workspace"),
         ],
     ));
 
     let workspace_tab = vec![
-        help_entry(keybind_label(&kb.workspace_picker), "workspace navigation"),
+        help_entry(
+            keybind_label(&kb.workspace_picker),
+            "sidebar tree navigation",
+        ),
         help_entry(keybind_label(&kb.goto), "session navigator"),
         help_entry(keybind_label(&kb.new_workspace), "new workspace"),
         help_entry(keybind_label(&kb.new_worktree), "new worktree"),
@@ -127,6 +132,14 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.previous_agent), "previous agent"),
         help_entry(keybind_label(&kb.next_agent), "next agent"),
         help_entry(indexed_label(&kb.focus_agent), "focus agent 1-9"),
+        help_entry(
+            indexed_label(&kb.jump_sidebar_item),
+            "jump to sidebar pane 1-10",
+        ),
+        help_entry(
+            keybind_label(&kb.jump_sidebar_item_prompt),
+            "enter sidebar pane number",
+        ),
         help_entry(keybind_label(&kb.new_tab), "new tab"),
         help_entry(keybind_label(&kb.rename_tab), "rename tab"),
         help_entry(keybind_label(&kb.previous_tab), "previous tab"),

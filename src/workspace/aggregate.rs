@@ -44,17 +44,19 @@ impl Tab {
                     .as_deref()
                     .or(agent_kind_label.as_deref())?
                     .to_string();
-                let agent_label = terminal
-                    .effective_display_agent()
-                    .unwrap_or_else(|| fallback_agent_label.clone());
                 let presentation = terminal.effective_presentation();
+                let agent_label = presentation
+                    .display_agent
+                    .clone()
+                    .unwrap_or_else(|| fallback_agent_label.clone());
                 Some(PaneDetail {
                     pane_id: *id,
                     tab_idx,
                     tab_label: tab_label.to_string(),
                     label: agent_label.clone(),
-                    pane_label: terminal
-                        .effective_title()
+                    pane_label: presentation
+                        .title
+                        .clone()
                         .or_else(|| terminal.manual_label.clone()),
                     terminal_title: terminal.terminal_title.clone(),
                     terminal_title_stripped: terminal.terminal_title_stripped(),

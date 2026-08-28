@@ -6,9 +6,9 @@ use std::{
 };
 
 use bytes::Bytes;
-use crossterm::event::KeyCode;
 #[cfg(test)]
 use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Direction;
 
 use crate::{
@@ -127,6 +127,23 @@ impl App {
     pub(crate) fn handle_navigate_key(&mut self, raw_key: TerminalKey) {
         let key = raw_key.as_key_event();
         self.state.update_dismissed = true;
+
+        if sidebar_tree_navigation_active(&self.state) {
+            if let Some(command) = sidebar_tree_command_for_key(&self.state, &raw_key) {
+                if let Some(target) =
+                    apply_sidebar_tree_command(&mut self.state, &self.terminal_runtimes, command)
+                {
+                    self.focus_sidebar_tree_target_via_api(target);
+                    leave_navigate_mode(&mut self.state);
+                }
+                return;
+            }
+        }
+
+        if let Some(action) = direct_sidebar_jump_action_for_key(&self.state, &raw_key) {
+            self.execute_tui_navigate_action(action, ActionContext::Navigate);
+            return;
+        }
 
         if key.code == KeyCode::Esc || self.state.is_prefix_key(&raw_key) {
             leave_navigate_mode(&mut self.state);
@@ -256,9 +273,36 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
+            NavigateAction::JumpSidebarItem(idx) => {
+                if self.state.view.layout == crate::app::state::ViewLayout::Desktop {
+                    if let Some(target) = self
+                        .state
+                        .select_sidebar_tree_jump_target_from(&self.terminal_runtimes, idx)
+                    {
+                        self.focus_sidebar_tree_target_via_api(target);
+                        leave_navigate_mode(&mut self.state);
+                    }
+                }
+            }
+            NavigateAction::OpenSidebarJump => {
+                if self.state.view.layout == crate::app::state::ViewLayout::Desktop {
+                    if self.state.mode != Mode::Navigate || self.state.sidebar_collapsed {
+                        self.state
+                            .open_sidebar_tree_navigation_from(&self.terminal_runtimes);
+                    } else {
+                        self.state.sidebar_tree_navigation.search_focused = false;
+                    }
+                    self.state.sidebar_tree_navigation.jump_input = Some(String::new());
+                }
+            }
             NavigateAction::WorkspacePicker => {
-                self.state.mobile_switcher_scroll = 0;
-                self.state.mode = Mode::Navigate;
+                if self.state.view.layout == crate::app::state::ViewLayout::Desktop {
+                    self.state
+                        .open_sidebar_tree_navigation_from(&self.terminal_runtimes);
+                } else {
+                    self.state.mobile_switcher_scroll = 0;
+                    self.state.mode = Mode::Navigate;
+                }
             }
             NavigateAction::PreviousWorkspace => {
                 if let Some(ws_idx) = self.relative_visible_workspace(-1) {
@@ -454,6 +498,28 @@ impl App {
     pub(crate) fn focus_workspace_idx_via_api(&mut self, ws_idx: usize) {
         let workspace_id = self.public_workspace_id(ws_idx);
         self.runtime_workspace_focus("tui.workspace.focus", workspace_id);
+    }
+
+    fn focus_sidebar_tree_target_via_api(&mut self, target: crate::app::state::NavigatorTarget) {
+        match target {
+            crate::app::state::NavigatorTarget::Workspace { ws_idx } => {
+                self.focus_workspace_idx_via_api(ws_idx);
+            }
+            crate::app::state::NavigatorTarget::Tab { ws_idx, tab_idx } => {
+                let pane_id = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|workspace| workspace.tabs.get(tab_idx))
+                    .map(|tab| tab.layout.focused());
+                if let Some(pane_id) = pane_id {
+                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                }
+            }
+            crate::app::state::NavigatorTarget::Pane {
+                ws_idx, pane_id, ..
+            } => self.focus_pane_internal_via_api(ws_idx, pane_id),
+        }
     }
 
     pub(crate) fn close_workspace_idx_via_api(&mut self, ws_idx: usize) {
@@ -1200,8 +1266,8 @@ pub(crate) fn command_for_key(
         .cloned()
 }
 
-fn unmodified_digit_for_key(key: &TerminalKey) -> Option<char> {
-    ('1'..='9').find(|digit| {
+fn unmodified_decimal_digit_for_key(key: &TerminalKey) -> Option<char> {
+    ('0'..='9').find(|digit| {
         crate::config::terminal_key_matches_combo(
             key,
             (
@@ -1210,6 +1276,10 @@ fn unmodified_digit_for_key(key: &TerminalKey) -> Option<char> {
             ),
         )
     })
+}
+
+fn unmodified_digit_for_key(key: &TerminalKey) -> Option<char> {
+    unmodified_decimal_digit_for_key(key).filter(|digit| *digit != '0')
 }
 
 #[cfg(test)]
@@ -1343,6 +1413,197 @@ fn navigate_reserved_action_for_key(state: &AppState, key: &TerminalKey) -> Opti
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarTreeCommand {
+    Move(isize),
+    First,
+    Last,
+    Collapse,
+    Expand,
+    Toggle,
+    FocusSearch,
+    ExitSearch,
+    Insert(char),
+    Backspace,
+    ClearQuery,
+    InsertJumpDigit(char),
+    BackspaceJump,
+    CancelJump,
+    ActivateJump,
+    Ignore,
+    Activate,
+}
+
+fn sidebar_tree_navigation_active(state: &AppState) -> bool {
+    state.view.layout == crate::app::state::ViewLayout::Desktop && !state.sidebar_collapsed
+}
+
+fn sidebar_tree_command_for_key(state: &AppState, key: &TerminalKey) -> Option<SidebarTreeCommand> {
+    let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+    if state.sidebar_tree_navigation.jump_input.is_some() {
+        if let Some(digit) = unmodified_decimal_digit_for_key(key) {
+            return Some(SidebarTreeCommand::InsertJumpDigit(digit));
+        }
+        return Some(match (code, modifiers) {
+            (KeyCode::Esc, modifiers) if modifiers.is_empty() => SidebarTreeCommand::CancelJump,
+            (KeyCode::Enter, modifiers) if modifiers.is_empty() => SidebarTreeCommand::ActivateJump,
+            (KeyCode::Backspace, modifiers) if modifiers.is_empty() => {
+                SidebarTreeCommand::BackspaceJump
+            }
+            _ => SidebarTreeCommand::Ignore,
+        });
+    }
+    if state.sidebar_tree_navigation.search_focused {
+        return match (code, modifiers) {
+            (KeyCode::Esc, modifiers) if modifiers.is_empty() => {
+                Some(SidebarTreeCommand::ExitSearch)
+            }
+            (KeyCode::Enter, modifiers) if modifiers.is_empty() => {
+                Some(SidebarTreeCommand::Activate)
+            }
+            (KeyCode::Up, modifiers) if modifiers.is_empty() => Some(SidebarTreeCommand::Move(-1)),
+            (KeyCode::Down, modifiers) if modifiers.is_empty() => Some(SidebarTreeCommand::Move(1)),
+            (KeyCode::Char('p'), KeyModifiers::CONTROL) => Some(SidebarTreeCommand::Move(-1)),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(SidebarTreeCommand::Move(1)),
+            (KeyCode::Backspace, modifiers) if modifiers.is_empty() => {
+                Some(SidebarTreeCommand::Backspace)
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(SidebarTreeCommand::ClearQuery),
+            (KeyCode::Char(ch), modifiers)
+                if modifiers.difference(KeyModifiers::SHIFT).is_empty() && !ch.is_control() =>
+            {
+                Some(SidebarTreeCommand::Insert(ch))
+            }
+            _ => None,
+        };
+    }
+
+    // User-configured tree movement wins over the built-in convenience keys.
+    // This keeps valid bindings such as `navigate_workspace_down = "space"`
+    // from being silently reinterpreted as a tree shortcut.
+    let navigate = &state.keybinds.navigate;
+    if navigate.workspace_up.matches_direct_key(key) || navigate.pane_up.matches_direct_key(key) {
+        return Some(SidebarTreeCommand::Move(-1));
+    }
+    if navigate.workspace_down.matches_direct_key(key) || navigate.pane_down.matches_direct_key(key)
+    {
+        return Some(SidebarTreeCommand::Move(1));
+    }
+    if navigate.pane_left.matches_direct_key(key) {
+        return Some(SidebarTreeCommand::Collapse);
+    }
+    if navigate.pane_right.matches_direct_key(key) {
+        return Some(SidebarTreeCommand::Expand);
+    }
+
+    // The remaining keys are sidebar defaults, not reservations. Let an
+    // explicitly configured action or custom command use them first.
+    if navigate_mode_non_indexed_action_for_key(state, key).is_some()
+        || command_for_key(state, key, BindingDispatch::Prefix).is_some()
+        || navigate_mode_indexed_action_for_key(state, key).is_some()
+    {
+        return None;
+    }
+
+    if modifiers.is_empty() {
+        match code {
+            KeyCode::Enter => return Some(SidebarTreeCommand::Activate),
+            KeyCode::Left => return Some(SidebarTreeCommand::Collapse),
+            KeyCode::Right => return Some(SidebarTreeCommand::Expand),
+            KeyCode::Home => return Some(SidebarTreeCommand::First),
+            KeyCode::End => return Some(SidebarTreeCommand::Last),
+            KeyCode::Char('/') => return Some(SidebarTreeCommand::FocusSearch),
+            KeyCode::Char(' ') => return Some(SidebarTreeCommand::Toggle),
+            KeyCode::Backspace if !state.sidebar_tree_navigation.query.is_empty() => {
+                return Some(SidebarTreeCommand::ClearQuery);
+            }
+            _ => {}
+        }
+    }
+
+    if modifiers == KeyModifiers::CONTROL {
+        match code {
+            KeyCode::Char('d') => return Some(SidebarTreeCommand::Move(8)),
+            KeyCode::Char('u') => return Some(SidebarTreeCommand::Move(-8)),
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn apply_sidebar_tree_command(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    command: SidebarTreeCommand,
+) -> Option<crate::app::state::NavigatorTarget> {
+    match command {
+        SidebarTreeCommand::Move(delta) => {
+            state.move_sidebar_tree_selection_from(terminal_runtimes, delta)
+        }
+        SidebarTreeCommand::First => {
+            state.move_sidebar_tree_selection_to_edge_from(terminal_runtimes, false)
+        }
+        SidebarTreeCommand::Last => {
+            state.move_sidebar_tree_selection_to_edge_from(terminal_runtimes, true)
+        }
+        SidebarTreeCommand::Collapse => {
+            state.collapse_sidebar_tree_selection_from(terminal_runtimes)
+        }
+        SidebarTreeCommand::Expand => state.expand_sidebar_tree_selection_from(terminal_runtimes),
+        SidebarTreeCommand::Toggle => state.toggle_sidebar_tree_selection_from(terminal_runtimes),
+        SidebarTreeCommand::FocusSearch => {
+            state.sidebar_tree_navigation.search_origin = state
+                .sidebar_tree_selected_target_from(terminal_runtimes)
+                .and_then(|target| state.sidebar_tree_item_id(target));
+            state.sidebar_tree_navigation.search_focused = true;
+        }
+        SidebarTreeCommand::ExitSearch => {
+            state.sidebar_tree_navigation.search_focused = false;
+        }
+        SidebarTreeCommand::Insert(ch) => {
+            state.update_sidebar_tree_query_from(terminal_runtimes, |query| query.push(ch));
+        }
+        SidebarTreeCommand::Backspace => {
+            state.update_sidebar_tree_query_from(terminal_runtimes, |query| {
+                query.pop();
+            });
+        }
+        SidebarTreeCommand::ClearQuery => {
+            state.update_sidebar_tree_query_from(terminal_runtimes, String::clear);
+        }
+        SidebarTreeCommand::InsertJumpDigit(digit) => {
+            if let Some(input) = state.sidebar_tree_navigation.jump_input.as_mut() {
+                input.push(digit);
+            }
+        }
+        SidebarTreeCommand::BackspaceJump => {
+            if let Some(input) = state.sidebar_tree_navigation.jump_input.as_mut() {
+                input.pop();
+            }
+        }
+        SidebarTreeCommand::CancelJump => {
+            state.sidebar_tree_navigation.jump_input = None;
+        }
+        SidebarTreeCommand::ActivateJump => {
+            let target_idx = state
+                .sidebar_tree_navigation
+                .jump_input
+                .as_deref()
+                .and_then(|input| input.parse::<usize>().ok())
+                .and_then(|number| number.checked_sub(1));
+            if let Some(target_idx) = target_idx {
+                return state.select_sidebar_tree_jump_target_from(terminal_runtimes, target_idx);
+            }
+        }
+        SidebarTreeCommand::Ignore => {}
+        SidebarTreeCommand::Activate => {
+            return state.sidebar_tree_selected_target_from(terminal_runtimes);
+        }
+    }
+    None
+}
+
 pub(super) fn api_pane_direction(direction: NavDirection) -> crate::api::schema::PaneDirection {
     match direction {
         NavDirection::Left => crate::api::schema::PaneDirection::Left,
@@ -1357,6 +1618,28 @@ pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     let mut terminal_runtimes = TerminalRuntimeRegistry::new();
     state.update_dismissed = true;
     let terminal_key = TerminalKey::from(key);
+
+    if sidebar_tree_navigation_active(state) {
+        if let Some(command) = sidebar_tree_command_for_key(state, &terminal_key) {
+            if let Some(target) = apply_sidebar_tree_command(state, &terminal_runtimes, command) {
+                state.focus_navigator_target(target);
+                state.sidebar_tree_navigation.query.clear();
+                state.sidebar_tree_navigation.search_focused = false;
+                state.sidebar_tree_navigation.search_origin = None;
+            }
+            return;
+        }
+    }
+
+    if let Some(action) = direct_sidebar_jump_action_for_key(state, &terminal_key) {
+        execute_navigate_action_in_context(
+            state,
+            &mut terminal_runtimes,
+            action,
+            ActionContext::Navigate,
+        );
+        return;
+    }
 
     if state.is_prefix_key(&terminal_key) || key.code == KeyCode::Esc {
         leave_navigate_mode(state);
@@ -1388,6 +1671,8 @@ pub(crate) enum NavigateAction {
     SwitchWorkspace(usize),
     SwitchTab(usize),
     FocusAgent(usize),
+    JumpSidebarItem(usize),
+    OpenSidebarJump,
     WorkspacePicker,
     PreviousWorkspace,
     NextWorkspace,
@@ -1438,6 +1723,7 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
         NavigateAction::SwitchWorkspace(_)
             | NavigateAction::SwitchTab(_)
             | NavigateAction::FocusAgent(_)
+            | NavigateAction::JumpSidebarItem(_)
             | NavigateAction::PreviousWorkspace
             | NavigateAction::NextWorkspace
             | NavigateAction::PreviousAgent
@@ -1494,6 +1780,13 @@ fn indexed_navigation_action(
                 }
             }
         }
+        for binding in &kb.jump_sidebar_item {
+            if trigger_matches(binding) {
+                if let Some(idx) = binding.matched_index(key) {
+                    return Some(NavigateAction::JumpSidebarItem(idx));
+                }
+            }
+        }
     }
 
     None
@@ -1540,6 +1833,10 @@ fn non_indexed_action_for_key(
         (&kb.next_workspace, NavigateAction::NextWorkspace),
         (&kb.previous_agent, NavigateAction::PreviousAgent),
         (&kb.next_agent, NavigateAction::NextAgent),
+        (
+            &kb.jump_sidebar_item_prompt,
+            NavigateAction::OpenSidebarJump,
+        ),
         (&kb.new_tab, NavigateAction::NewTab),
         (&kb.rename_tab, NavigateAction::RenameTab),
         (&kb.previous_tab, NavigateAction::PreviousTab),
@@ -1625,6 +1922,18 @@ fn navigate_mode_indexed_action_for_key(
     indexed_navigation_action(state, key, BindingDispatch::Prefix)
 }
 
+fn direct_sidebar_jump_action_for_key(
+    state: &AppState,
+    key: &TerminalKey,
+) -> Option<NavigateAction> {
+    non_indexed_action_for_key(state, key, BindingDispatch::Direct)
+        .filter(|action| *action == NavigateAction::OpenSidebarJump)
+        .or_else(|| {
+            indexed_navigation_action(state, key, BindingDispatch::Direct)
+                .filter(|action| matches!(action, NavigateAction::JumpSidebarItem(_)))
+        })
+}
+
 #[cfg(test)]
 pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateAction) {
     let mut terminal_runtimes = TerminalRuntimeRegistry::new();
@@ -1708,9 +2017,33 @@ pub(super) fn execute_navigate_action_in_context(
                 leave_navigate_mode(state);
             }
         }
+        NavigateAction::JumpSidebarItem(idx) => {
+            if state.view.layout == crate::app::state::ViewLayout::Desktop {
+                if let Some(target) =
+                    state.select_sidebar_tree_jump_target_from(terminal_runtimes, idx)
+                {
+                    state.focus_navigator_target(target);
+                    leave_navigate_mode(state);
+                }
+            }
+        }
+        NavigateAction::OpenSidebarJump => {
+            if state.view.layout == crate::app::state::ViewLayout::Desktop {
+                if state.mode != Mode::Navigate || state.sidebar_collapsed {
+                    state.open_sidebar_tree_navigation_from(terminal_runtimes);
+                } else {
+                    state.sidebar_tree_navigation.search_focused = false;
+                }
+                state.sidebar_tree_navigation.jump_input = Some(String::new());
+            }
+        }
         NavigateAction::WorkspacePicker => {
-            state.mobile_switcher_scroll = 0;
-            state.mode = Mode::Navigate;
+            if state.view.layout == crate::app::state::ViewLayout::Desktop {
+                state.open_sidebar_tree_navigation_from(terminal_runtimes);
+            } else {
+                state.mobile_switcher_scroll = 0;
+                state.mode = Mode::Navigate;
+            }
         }
         NavigateAction::PreviousWorkspace => {
             state.previous_workspace();
@@ -1865,9 +2198,30 @@ pub(super) fn execute_navigate_action_in_context(
 
 fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<usize> {
     let idx = match context {
-        ActionContext::Direct | ActionContext::Prefix => state.active.unwrap_or(state.selected),
-        ActionContext::Navigate => state.selected,
-    };
+        ActionContext::Direct | ActionContext::Prefix => {
+            Some(state.active.unwrap_or(state.selected))
+        }
+        ActionContext::Navigate
+            if state.view.layout == crate::app::state::ViewLayout::Desktop
+                && !state.sidebar_collapsed =>
+        {
+            state
+                .sidebar_tree_selected_workspace_index()
+                .or_else(|| {
+                    state
+                        .view
+                        .sidebar_tree_rows
+                        .get(state.sidebar_tree_navigation.selected)
+                        .map(|row| match row.target {
+                            crate::app::state::NavigatorTarget::Workspace { ws_idx }
+                            | crate::app::state::NavigatorTarget::Tab { ws_idx, .. }
+                            | crate::app::state::NavigatorTarget::Pane { ws_idx, .. } => ws_idx,
+                        })
+                })
+                .or_else(|| (!state.view.sidebar_tree_computed).then_some(state.selected))
+        }
+        ActionContext::Navigate => Some(state.selected),
+    }?;
     (idx < state.workspaces.len()).then_some(idx)
 }
 
@@ -1928,6 +2282,10 @@ fn move_active_tab_relative(state: &mut AppState, delta: isize) {
 }
 
 fn leave_navigate_mode(state: &mut AppState) {
+    state.sidebar_tree_navigation.query.clear();
+    state.sidebar_tree_navigation.search_focused = false;
+    state.sidebar_tree_navigation.search_origin = None;
+    state.sidebar_tree_navigation.jump_input = None;
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     }
@@ -2333,7 +2691,7 @@ mod tests {
     }
 
     #[test]
-    fn navigate_down_follows_grouped_sidebar_visual_order() {
+    fn navigate_down_follows_sidebar_tree_visual_order() {
         let mut state = state_with_workspaces(&["main", "normal", "issue"]);
         mark_worktree_space_member(&mut state, 0, "repo-key");
         mark_worktree_space_member(&mut state, 2, "repo-key");
@@ -2346,7 +2704,38 @@ mod tests {
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.selected, 2);
+        assert!(matches!(
+            state.sidebar_tree_selected_target_from(&TerminalRuntimeRegistry::new()),
+            Some(crate::app::state::NavigatorTarget::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                ..
+            })
+        ));
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn navigate_down_selects_tab_group_before_first_pane() {
+        let mut state = state_with_workspaces(&["main"]);
+        state.workspaces[0].test_split(Direction::Horizontal);
+        state.mode = Mode::Navigate;
+        state.sidebar_tree_navigation.selected = 0;
+        state.sidebar_tree_navigation.selected_node =
+            state.sidebar_tree_item_id(crate::app::state::NavigatorTarget::Workspace { ws_idx: 0 });
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            state.sidebar_tree_selected_target_from(&TerminalRuntimeRegistry::new()),
+            Some(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+        );
     }
 
     #[test]
@@ -2463,7 +2852,7 @@ mod tests {
     }
 
     #[test]
-    fn movement_action_stays_in_navigate_mode() {
+    fn movement_action_moves_sidebar_tree_cursor_and_stays_in_navigate_mode() {
         let mut state = state_with_workspaces(&["a", "b"]);
         state.selected = 0;
 
@@ -2472,8 +2861,80 @@ mod tests {
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.sidebar_tree_navigation.selected, 1);
+        assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn workspace_picker_focuses_the_desktop_sidebar_on_the_current_pane() {
+        let mut state = state_with_workspaces(&["one"]);
+        let current = state.workspaces[0].tabs[0].root_pane;
+        state.sidebar_collapsed = true;
+
+        execute_navigate_action(&mut state, NavigateAction::WorkspacePicker);
+
+        assert!(!state.sidebar_collapsed);
+        assert_eq!(state.mode, Mode::Navigate);
+        assert!(matches!(
+            state.sidebar_tree_selected_target_from(&TerminalRuntimeRegistry::new()),
+            Some(crate::app::state::NavigatorTarget::Pane { pane_id, .. }) if pane_id == current
+        ));
+    }
+
+    #[test]
+    fn sidebar_tree_cursor_does_not_change_focus_until_enter() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let below = state.workspaces[0].test_split(Direction::Vertical);
+        state.workspaces[0].layout.focus_pane(root);
+        state.open_sidebar_tree_navigation_from(&TerminalRuntimeRegistry::new());
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        assert!(matches!(
+            state.sidebar_tree_selected_target_from(&TerminalRuntimeRegistry::new()),
+            Some(crate::app::state::NavigatorTarget::Pane { pane_id, .. }) if pane_id == below
+        ));
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(below));
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn sidebar_tree_search_escapes_to_tree_before_exiting() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.open_sidebar_tree_navigation_from(&TerminalRuntimeRegistry::new());
+
+        for code in [KeyCode::Char('/'), KeyCode::Char('t')] {
+            handle_navigate_key(&mut state, KeyEvent::new(code, KeyModifiers::empty()));
+        }
+        assert!(state.sidebar_tree_navigation.search_focused);
+        assert_eq!(state.sidebar_tree_navigation.query, "t");
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Navigate);
+        assert!(!state.sidebar_tree_navigation.search_focused);
+        assert_eq!(state.sidebar_tree_navigation.query, "t");
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.sidebar_tree_navigation.query.is_empty());
     }
 
     #[test]
@@ -2495,15 +2956,83 @@ navigate_pane_down = "ctrl+j"
             KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
         );
 
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.sidebar_tree_navigation.selected, 1);
+        assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::Navigate);
     }
 
     #[test]
-    fn navigate_pane_keys_are_configurable() {
+    fn configured_tree_movement_wins_over_builtin_toggle_shortcut() {
+        let mut state = state_with_workspaces(&["a", "b"]);
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+navigate_workspace_down = "space"
+"#,
+        )
+        .unwrap();
+        state.keybinds = config.keybinds();
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.sidebar_tree_navigation.selected, 1);
+        assert_eq!(state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn configured_action_wins_over_builtin_search_shortcut() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.help = crate::config::ActionKeybinds::prefix("/");
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::KeybindHelp);
+        assert!(!state.sidebar_tree_navigation.search_focused);
+    }
+
+    #[test]
+    fn clearing_blurred_search_preserves_current_tree_selection() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.open_sidebar_tree_navigation_from(&TerminalRuntimeRegistry::new());
+
+        for code in [
+            KeyCode::Char('/'),
+            KeyCode::Char('t'),
+            KeyCode::Char('w'),
+            KeyCode::Char('o'),
+        ] {
+            handle_navigate_key(&mut state, KeyEvent::new(code, KeyModifiers::empty()));
+        }
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        let selected = state.sidebar_tree_navigation.selected_node.clone();
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+
+        assert!(state.sidebar_tree_navigation.query.is_empty());
+        assert_eq!(state.sidebar_tree_navigation.selected_node, selected);
+    }
+
+    #[test]
+    fn navigate_direction_keys_move_tree_cursor_without_changing_pane_focus() {
         let mut state = state_with_workspaces(&["test"]);
         let root = state.workspaces[0].tabs[0].root_pane;
-        let below = state.workspaces[0].test_split(Direction::Vertical);
+        let _below = state.workspaces[0].test_split(Direction::Vertical);
         state.workspaces[0].layout.focus_pane(root);
         state.view.pane_infos = state.workspaces[0]
             .active_tab()
@@ -2525,7 +3054,14 @@ navigate_pane_down = "ctrl+j"
             KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
         );
 
-        assert_eq!(state.workspaces[0].focused_pane_id(), Some(below));
+        assert_eq!(
+            state.sidebar_tree_selected_target_from(&TerminalRuntimeRegistry::new()),
+            Some(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+        );
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
         assert_eq!(state.mode, Mode::Navigate);
     }
 
@@ -2533,7 +3069,7 @@ navigate_pane_down = "ctrl+j"
     fn focus_pane_prefix_rhs_does_not_create_navigate_mode_pane_shortcut() {
         let mut state = state_with_workspaces(&["test"]);
         let root = state.workspaces[0].tabs[0].root_pane;
-        let below = state.workspaces[0].test_split(Direction::Vertical);
+        let _below = state.workspaces[0].test_split(Direction::Vertical);
         state.workspaces[0].layout.focus_pane(root);
         state.view.pane_infos = state.workspaces[0]
             .active_tab()
@@ -2559,15 +3095,22 @@ focus_pane_down = "prefix+f"
             &mut state,
             KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
         );
-        assert_eq!(state.workspaces[0].focused_pane_id(), Some(below));
+        assert_eq!(
+            state.sidebar_tree_selected_target_from(&TerminalRuntimeRegistry::new()),
+            Some(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+        );
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
         assert_eq!(state.mode, Mode::Navigate);
     }
 
     #[test]
-    fn customized_navigate_pane_key_disables_matching_prefix_rhs_fallback() {
+    fn customized_navigate_direction_key_moves_only_the_tree_cursor() {
         let mut state = state_with_workspaces(&["test"]);
         let root = state.workspaces[0].tabs[0].root_pane;
-        let below = state.workspaces[0].test_split(Direction::Vertical);
+        let _below = state.workspaces[0].test_split(Direction::Vertical);
         state.workspaces[0].layout.focus_pane(root);
         state.view.pane_infos = state.workspaces[0]
             .active_tab()
@@ -2593,14 +3136,20 @@ navigate_pane_down = "ctrl+j"
             &mut state,
             KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
         );
-        assert_eq!(state.workspaces[0].focused_pane_id(), Some(below));
+        assert_eq!(
+            state.sidebar_tree_selected_target_from(&TerminalRuntimeRegistry::new()),
+            Some(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+        );
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
         assert_eq!(state.mode, Mode::Navigate);
     }
 
     #[test]
-    fn left_and_right_arrows_remain_permanent_navigate_pane_aliases() {
+    fn left_and_right_arrows_collapse_and_expand_sidebar_tree_nodes() {
         let mut state = state_with_workspaces(&["test"]);
-        let root = state.workspaces[0].tabs[0].root_pane;
         let right = state.workspaces[0].test_split(Direction::Horizontal);
         state.workspaces[0].layout.focus_pane(right);
         crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 24));
@@ -2618,7 +3167,8 @@ navigate_pane_right = "ctrl+l"
             &mut state,
             KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
         );
-        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(right));
+        assert_eq!(crate::ui::sidebar_tree_rows(&state).len(), 1);
         crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 24));
 
         handle_navigate_key(
@@ -2626,7 +3176,194 @@ navigate_pane_right = "ctrl+l"
             KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
         );
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(right));
+        assert!(crate::ui::sidebar_tree_rows(&state).len() > 1);
         assert_eq!(state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn left_from_pane_selects_tab_then_collapses_it() {
+        let mut state = state_with_workspaces(&["test"]);
+        let right = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].layout.focus_pane(right);
+        let runtimes = TerminalRuntimeRegistry::new();
+        state.open_sidebar_tree_navigation_from(&runtimes);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            state.sidebar_tree_selected_target_from(&runtimes),
+            Some(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+        );
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            (
+                state.sidebar_tree_selected_target_from(&runtimes),
+                crate::ui::sidebar_tree_rows(&state)
+                    .into_iter()
+                    .map(|row| row.target)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                Some(crate::app::state::NavigatorTarget::Tab {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                }),
+                vec![
+                    crate::app::state::NavigatorTarget::Workspace { ws_idx: 0 },
+                    crate::app::state::NavigatorTarget::Tab {
+                        ws_idx: 0,
+                        tab_idx: 0,
+                    },
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn left_from_grouped_condensed_pane_uses_its_workspace_as_parent() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        mark_worktree_space_member(&mut state, 0, "repo-key");
+        mark_worktree_space_member(&mut state, 1, "repo-key");
+        state.workspaces[0].test_split(Direction::Horizontal);
+        state.active = Some(1);
+        state.selected = 1;
+        let parent_tab_id = state
+            .sidebar_tree_item_id(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+            .expect("parent tab should have a stable tree id");
+        let runtimes = TerminalRuntimeRegistry::new();
+        state.open_sidebar_tree_navigation_from(&runtimes);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            (
+                state.sidebar_tree_selected_target_from(&runtimes),
+                state
+                    .sidebar_tree_navigation
+                    .collapsed_nodes
+                    .contains(&parent_tab_id),
+            ),
+            (
+                Some(crate::app::state::NavigatorTarget::Workspace { ws_idx: 1 }),
+                false,
+            )
+        );
+    }
+
+    #[test]
+    fn right_from_workspace_selects_tab_expands_it_then_enters_first_pane() {
+        let mut state = state_with_workspaces(&["test"]);
+        let first_pane = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].test_split(Direction::Horizontal);
+        let runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Navigate;
+        state.sidebar_tree_navigation.selected_node =
+            state.sidebar_tree_item_id(crate::app::state::NavigatorTarget::Workspace { ws_idx: 0 });
+        let tab_id = state
+            .sidebar_tree_item_id(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+            .expect("tab should have a stable tree id");
+        state.sidebar_tree_navigation.collapsed_nodes.insert(tab_id);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state.sidebar_tree_selected_target_from(&runtimes),
+            Some(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+        );
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state.sidebar_tree_selected_target_from(&runtimes),
+            Some(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+        );
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            state.sidebar_tree_selected_target_from(&runtimes),
+            Some(crate::app::state::NavigatorTarget::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: first_pane,
+            })
+        );
+    }
+
+    #[test]
+    fn right_from_later_tab_expands_that_collapsed_group() {
+        let mut state = state_with_workspaces(&["test"]);
+        let split_tab = state.workspaces[0].test_add_tab(Some("split"));
+        state.workspaces[0].switch_tab(split_tab);
+        let split_pane = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].switch_tab(0);
+        state.mode = Mode::Navigate;
+        state.sidebar_tree_navigation.selected_node =
+            state.sidebar_tree_item_id(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: split_tab,
+            });
+        let tab_id = state
+            .sidebar_tree_item_id(crate::app::state::NavigatorTarget::Tab {
+                ws_idx: 0,
+                tab_idx: split_tab,
+            })
+            .expect("split tab should have a stable tree id");
+        state
+            .sidebar_tree_navigation
+            .collapsed_nodes
+            .insert(tab_id.clone());
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            (
+                state
+                    .sidebar_tree_navigation
+                    .collapsed_nodes
+                    .contains(&tab_id),
+                crate::ui::sidebar_tree_rows(&state)
+                    .iter()
+                    .any(|row| matches!(row.target, crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == split_pane)),
+            ),
+            (false, true)
+        );
     }
 
     #[test]
@@ -2848,6 +3585,224 @@ last_pane = "prefix+tab"
         );
 
         assert_eq!(action, Some(NavigateAction::SwitchTab(2)));
+    }
+
+    #[test]
+    fn direct_alt_zero_jumps_to_tenth_pane() {
+        let mut app = app_with_test_workspaces(&[
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        ]);
+        let target_pane = app.state.workspaces[9].tabs[0].root_pane;
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item = ["alt+1..9", "alt+0"]
+"#,
+        )
+        .expect("config should parse");
+        app.state.keybinds = config.keybinds();
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Char('0'), KeyModifiers::ALT));
+
+        assert_eq!(
+            (
+                app.state.active,
+                app.state.workspaces[9].focused_pane_id(),
+                app.state.sidebar_tree_navigation.selected
+            ),
+            (Some(9), Some(target_pane), 19)
+        );
+    }
+
+    #[test]
+    fn direct_alt_one_jumps_to_first_pane_without_consuming_visual_tab_group() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let first_pane = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item = "alt+1"
+"#,
+        )
+        .expect("config should parse");
+        app.state.keybinds = config.keybinds();
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Char('1'), KeyModifiers::ALT));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(first_pane));
+    }
+
+    #[test]
+    fn multi_digit_sidebar_jump_activates_twelfth_pane() {
+        let mut app = app_with_test_workspaces(&[
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve",
+        ]);
+        let target_pane = app.state.workspaces[11].tabs[0].root_pane;
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item_prompt = "alt+j"
+"#,
+        )
+        .expect("config should parse");
+        app.state.keybinds = config.keybinds();
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty()));
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('2'), KeyModifiers::empty()));
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(
+            (app.state.active, app.state.workspaces[11].focused_pane_id()),
+            (Some(11), Some(target_pane))
+        );
+    }
+
+    #[test]
+    fn multi_digit_sidebar_jump_uses_filtered_tree_order_beyond_ten() {
+        let mut app = app_with_test_workspaces(&[
+            "excluded",
+            "matching-one",
+            "matching-two",
+            "matching-three",
+            "matching-four",
+            "matching-five",
+            "matching-six",
+            "matching-seven",
+            "matching-eight",
+            "matching-nine",
+            "matching-ten",
+            "matching-eleven",
+            "matching-twelve",
+        ]);
+        let target_pane = app.state.workspaces[12].tabs[0].root_pane;
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item_prompt = "alt+j"
+"#,
+        )
+        .expect("config should parse");
+        app.state.keybinds = config.keybinds();
+        app.state
+            .open_sidebar_tree_navigation_from(&app.terminal_runtimes);
+        app.state.sidebar_tree_navigation.query = "matching".into();
+        app.state.sidebar_tree_navigation.search_focused = true;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty()));
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('2'), KeyModifiers::empty()));
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(
+            (app.state.active, app.state.workspaces[12].focused_pane_id()),
+            (Some(12), Some(target_pane))
+        );
+    }
+
+    #[test]
+    fn direct_sidebar_jump_is_inactive_without_desktop_tree() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item = "alt+4"
+"#,
+        )
+        .expect("config should parse");
+        app.state.keybinds = config.keybinds();
+        app.state.view.layout = crate::app::state::ViewLayout::Mobile;
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Char('4'), KeyModifiers::ALT));
+
+        assert_eq!(app.state.active, Some(0));
+    }
+
+    #[test]
+    fn out_of_range_sidebar_jump_stays_open_until_cancelled() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item_prompt = "alt+j"
+"#,
+        )
+        .expect("config should parse");
+        app.state.keybinds = config.keybinds();
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        for code in [KeyCode::Char('9'), KeyCode::Char('9'), KeyCode::Enter] {
+            app.handle_navigate_key(TerminalKey::new(code, KeyModifiers::empty()));
+        }
+
+        assert_eq!(
+            (
+                app.state.mode,
+                app.state.sidebar_tree_navigation.jump_input.as_deref()
+            ),
+            (Mode::Navigate, Some("99"))
+        );
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert_eq!(
+            (
+                app.state.mode,
+                app.state.sidebar_tree_navigation.jump_input.as_deref()
+            ),
+            (Mode::Navigate, None)
+        );
+    }
+
+    #[test]
+    fn sidebar_jump_prompt_preserves_filter() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item_prompt = "alt+j"
+"#,
+        )
+        .expect("config should parse");
+        app.state.keybinds = config.keybinds();
+        app.state
+            .open_sidebar_tree_navigation_from(&app.terminal_runtimes);
+        app.state.sidebar_tree_navigation.query = "two".into();
+        app.state.sidebar_tree_navigation.search_focused = true;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::ALT));
+
+        assert_eq!(
+            (
+                app.state.sidebar_tree_navigation.query.as_str(),
+                app.state.sidebar_tree_navigation.search_focused,
+                app.state.sidebar_tree_navigation.jump_input.as_deref()
+            ),
+            ("two", false, Some(""))
+        );
+    }
+
+    #[test]
+    fn direct_sidebar_jump_uses_filtered_tree_order() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item = "alt+1..9"
+"#,
+        )
+        .expect("config should parse");
+        app.state.keybinds = config.keybinds();
+        app.state
+            .open_sidebar_tree_navigation_from(&app.terminal_runtimes);
+        app.state.sidebar_tree_navigation.query = "two".into();
+        app.state.sidebar_tree_navigation.search_focused = true;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('1'), KeyModifiers::ALT));
+
+        assert_eq!(app.state.active, Some(1));
     }
 
     #[test]
@@ -3156,8 +4111,35 @@ command = "printf literal > '{}'"
 
         app.handle_navigate_key(TerminalKey::new(KeyCode::Down, KeyModifiers::empty()));
 
-        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.sidebar_tree_navigation.selected, 1);
+        assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn app_enter_activates_selected_cross_workspace_pane() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let target = crate::app::state::NavigatorTarget::Pane {
+            ws_idx: 1,
+            tab_idx: 0,
+            pane_id,
+        };
+        app.state
+            .open_sidebar_tree_navigation_from(&app.terminal_runtimes);
+        let rows = crate::ui::sidebar_tree_rows_from(&app.state, &app.terminal_runtimes);
+        let selected = rows
+            .iter()
+            .position(|row| row.target == target)
+            .expect("target pane row");
+        app.state.sidebar_tree_navigation.selected = selected;
+        app.state.sidebar_tree_navigation.selected_node = app.state.sidebar_tree_item_id(target);
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(pane_id));
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
@@ -3190,7 +4172,8 @@ navigate_pane_down = "ctrl+j"
 
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()));
 
-        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.sidebar_tree_navigation.selected, 1);
+        assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.mode, Mode::Navigate);
     }
 
@@ -3230,9 +4213,8 @@ navigate_pane_down = "ctrl+j"
     }
 
     #[tokio::test]
-    async fn navigate_focus_pane_keeps_navigate_mode_active() {
+    async fn navigate_tree_movement_does_not_change_pane_focus() {
         let mut app = app_with_test_workspaces(&["test"]);
-        let root = app.state.workspaces[0].tabs[0].root_pane;
         let below = app.state.workspaces[0].test_split(Direction::Vertical);
         app.state.workspaces[0].layout.focus_pane(below);
         app.state.view.pane_infos = app.state.workspaces[0]
@@ -3245,7 +4227,7 @@ navigate_pane_down = "ctrl+j"
         app.handle_key(TerminalKey::new(KeyCode::Char('k'), KeyModifiers::empty()))
             .await;
 
-        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(below));
         assert_eq!(app.state.mode, Mode::Navigate);
     }
 

@@ -266,14 +266,18 @@ impl IndexedKeybind {
     pub fn matched_index(&self, key: &TerminalKey) -> Option<usize> {
         let combo = self.trigger.combo();
         let (expected_code, _) = normalize_key_combo(combo);
-        let KeyCode::Char(key_number @ '1'..='9') = expected_code else {
+        let KeyCode::Char(key_number @ '0'..='9') = expected_code else {
             return None;
         };
         let legacy_shifted_number = matches!(key.code, KeyCode::Char(c)
             if shifted_number_symbol(c) == Some(key_number)
                 && indexed_shifted_number_matches(key, combo, key_number));
         if terminal_key_matches_combo(key, combo) || legacy_shifted_number {
-            Some((key_number as usize) - ('1' as usize))
+            Some(match key_number {
+                '0' => 9,
+                '1'..='9' => (key_number as usize) - ('1' as usize),
+                _ => return None,
+            })
         } else {
             None
         }
@@ -324,6 +328,8 @@ pub struct Keybinds {
     pub previous_agent: ActionKeybinds,
     pub next_agent: ActionKeybinds,
     pub focus_agent: Vec<IndexedKeybind>,
+    pub jump_sidebar_item: Vec<IndexedKeybind>,
+    pub jump_sidebar_item_prompt: ActionKeybinds,
     pub new_tab: ActionKeybinds,
     pub rename_tab: ActionKeybinds,
     pub previous_tab: ActionKeybinds,
@@ -492,6 +498,8 @@ impl Config {
             previous_agent: empty_action!(),
             next_agent: empty_action!(),
             focus_agent: Vec::new(),
+            jump_sidebar_item: Vec::new(),
+            jump_sidebar_item_prompt: empty_action!(),
             new_tab: empty_action!(),
             rename_tab: empty_action!(),
             previous_tab: empty_action!(),
@@ -555,6 +563,7 @@ impl Config {
                 $target:expr,
                 $field:ident,
                 $legacy_config:expr,
+                $allow_zero:expr,
                 $source:expr
             ) => {
                 if field_source!($field) == $source {
@@ -567,6 +576,7 @@ impl Config {
                             &self.keys.$field,
                             &mut registry,
                             &mut diagnostics,
+                            $allow_zero,
                             $source,
                         );
                     }
@@ -627,6 +637,19 @@ impl Config {
                 keybinds.focus_agent,
                 focus_agent,
                 &self.keys.indexed.agents,
+                false,
+                source
+            );
+            apply_indexed!(
+                keybinds.jump_sidebar_item,
+                jump_sidebar_item,
+                "",
+                true,
+                source
+            );
+            apply_action!(
+                keybinds.jump_sidebar_item_prompt,
+                jump_sidebar_item_prompt,
                 source
             );
             apply_action!(keybinds.new_tab, new_tab, source);
@@ -639,12 +662,14 @@ impl Config {
                 keybinds.switch_tab,
                 switch_tab,
                 &self.keys.indexed.tabs,
+                false,
                 source
             );
             apply_indexed!(
                 keybinds.switch_workspace,
                 switch_workspace,
                 &self.keys.indexed.workspaces,
+                false,
                 source
             );
             apply_action!(keybinds.close_tab, close_tab, source);
@@ -872,6 +897,7 @@ fn parse_indexed_bindings(
     config: &BindingConfig,
     registry: &mut BindingRegistry,
     diagnostics: &mut Vec<String>,
+    allow_zero: bool,
     source: BindingSource,
 ) -> Vec<IndexedKeybind> {
     let mut bindings = Vec::new();
@@ -882,7 +908,15 @@ fn parse_indexed_bindings(
         }
         match parse_binding_string(raw) {
             Some(ParsedBinding::Single(binding)) => {
-                push_indexed_binding(field, binding, registry, diagnostics, source, &mut bindings);
+                push_indexed_binding(
+                    field,
+                    binding,
+                    registry,
+                    diagnostics,
+                    allow_zero,
+                    source,
+                    &mut bindings,
+                );
             }
             Some(ParsedBinding::Range(range)) => {
                 for binding in range {
@@ -891,6 +925,7 @@ fn parse_indexed_bindings(
                         binding,
                         registry,
                         diagnostics,
+                        allow_zero,
                         source,
                         &mut bindings,
                     );
@@ -911,12 +946,16 @@ fn push_indexed_binding(
     binding: ResolvedBinding,
     registry: &mut BindingRegistry,
     diagnostics: &mut Vec<String>,
+    allow_zero: bool,
     source: BindingSource,
     bindings: &mut Vec<IndexedKeybind>,
 ) {
-    if !matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
+    let valid_digit = matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9'))
+        || (allow_zero && matches!(binding.trigger.combo().0, KeyCode::Char('0')));
+    if !valid_digit {
+        let valid_range = if allow_zero { "0..9" } else { "1..9" };
         let diag = format!(
-            "indexed keybinding must use 1..9: {field} = {:?}; disabling binding",
+            "indexed keybinding must use {valid_range}: {field} = {:?}; disabling binding",
             binding.label
         );
         warn!(message = %diag, "config diagnostic");
@@ -2011,6 +2050,43 @@ switch_workspace = "prefix+shift+1..9"
             BindingTrigger::Prefix((KeyCode::Char('1'), KeyModifiers::SHIFT))
         );
         assert_eq!(kb.switch_workspace[0].label, "prefix+shift+1");
+    }
+
+    #[test]
+    fn sidebar_indexed_binding_zero_maps_to_tenth_position() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+jump_sidebar_item = "alt+0"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        let key = TerminalKey::new(KeyCode::Char('0'), KeyModifiers::ALT);
+
+        assert_eq!(
+            kb.jump_sidebar_item
+                .iter()
+                .find_map(|binding| binding.matched_index(&key)),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn non_sidebar_indexed_binding_zero_remains_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+focus_agent = "alt+0"
+"#,
+        )
+        .unwrap();
+
+        assert!(config.keybinds().focus_agent.is_empty());
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("indexed keybinding must use 1..9")));
     }
 
     #[test]

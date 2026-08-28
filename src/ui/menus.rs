@@ -149,18 +149,20 @@ pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: R
     let settings = prefix_rhs_label(&kb.settings);
     let goto = prefix_rhs_label(&kb.goto);
     let detach = prefix_rhs_label(&kb.detach);
-    let workspace_nav = format!(
-        "{} / {}",
+    let tree_nav = format!(
+        "{} / {} / {} / {}",
         keybind_label(&kb.navigate.workspace_up),
-        keybind_label(&kb.navigate.workspace_down)
+        keybind_label(&kb.navigate.workspace_down),
+        keybind_label(&kb.navigate.pane_up),
+        keybind_label(&kb.navigate.pane_down)
     );
     let line = Line::from(vec![
         Span::styled(" NAVIGATE ", mode_style),
         Span::raw(" "),
         Span::styled("esc", key),
         Span::styled(" back  ", dim),
-        Span::styled(workspace_nav, key),
-        Span::styled(" ws  ", dim),
+        Span::styled(tree_nav, key),
+        Span::styled(" tree  ", dim),
         Span::styled("⇥", key),
         Span::styled(" pane  ", dim),
         Span::styled(goto, key),

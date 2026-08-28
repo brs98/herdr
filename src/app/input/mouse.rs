@@ -5,9 +5,8 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, MenuListState, Mode,
+        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -430,14 +429,6 @@ impl AppState {
                     return None;
                 }
 
-                if self.on_sidebar_section_divider(mouse.column, mouse.row) {
-                    self.drag = Some(DragState {
-                        target: DragTarget::SidebarSectionDivider,
-                    });
-                    self.set_sidebar_section_split(mouse.row);
-                    return None;
-                }
-
                 if !in_sidebar {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         let grab_offset = match border.direction {
@@ -571,6 +562,11 @@ impl AppState {
                         let chevron = crate::ui::workspace_group_chevron_rect(card);
                         mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0
                     }) {
+                        if self.mode == Mode::Navigate
+                            && !self.sidebar_tree_navigation.query.is_empty()
+                        {
+                            return None;
+                        }
                         if let Some((key, collapsed)) =
                             crate::ui::workspace_parent_group_state(self, card.ws_idx)
                         {
@@ -584,6 +580,35 @@ impl AppState {
                         }
                     }
 
+                    if let Some(row_area) = self
+                        .view
+                        .sidebar_tree_row_areas
+                        .iter()
+                        .find(|row_area| {
+                            let disclosure = row_area.disclosure_rect;
+                            disclosure.width > 0
+                                && mouse.row == disclosure.y
+                                && mouse.column == disclosure.x
+                        })
+                        .copied()
+                    {
+                        if self.mode != Mode::Navigate
+                            || self.sidebar_tree_navigation.query.is_empty()
+                        {
+                            if let Some(node_id) = self.sidebar_tree_item_id(row_area.target) {
+                                if !self
+                                    .sidebar_tree_navigation
+                                    .collapsed_nodes
+                                    .remove(&node_id)
+                                {
+                                    self.sidebar_tree_navigation.collapsed_nodes.insert(node_id);
+                                }
+                                self.ensure_sidebar_tree_selection_visible_from(terminal_runtimes);
+                            }
+                        }
+                        return None;
+                    }
+
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_press = Some(WorkspacePressState {
                             ws_idx: idx,
@@ -593,37 +618,31 @@ impl AppState {
                         return None;
                     }
 
-                    if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
-                        self.agent_panel_sort = match self.agent_panel_sort {
-                            AgentPanelSort::Spaces => AgentPanelSort::Priority,
-                            AgentPanelSort::Priority => AgentPanelSort::Spaces,
-                        };
-                        self.agent_panel_scroll = 0;
-                        self.mark_session_dirty();
-                        return None;
-                    }
-
-                    if let Some(target) =
-                        self.agent_panel_scrollbar_target_at(mouse.column, mouse.row)
-                    {
-                        match target {
-                            ScrollbarClickTarget::Thumb { grab_row_offset } => {
-                                self.drag = Some(DragState {
-                                    target: DragTarget::AgentPanelScrollbar { grab_row_offset },
-                                });
-                            }
-                            ScrollbarClickTarget::Track { offset_from_bottom } => {
-                                self.set_agent_panel_offset_from_bottom(offset_from_bottom);
+                    match self.sidebar_tree_target_at(mouse.row) {
+                        Some(crate::app::state::NavigatorTarget::Tab { ws_idx, tab_idx }) => {
+                            let pane_id = self
+                                .workspaces
+                                .get(ws_idx)
+                                .and_then(|workspace| workspace.tabs.get(tab_idx))
+                                .map(|tab| tab.layout.focused());
+                            if let Some(pane_id) = pane_id {
+                                self.mode = Mode::Terminal;
+                                self.sidebar_tree_navigation.query.clear();
+                                self.sidebar_tree_navigation.search_focused = false;
+                                self.sidebar_tree_navigation.search_origin = None;
+                                return Some(MouseAction::FocusPane { ws_idx, pane_id });
                             }
                         }
-                        return None;
-                    }
-
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
-                        self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                        Some(crate::app::state::NavigatorTarget::Pane {
+                            ws_idx, pane_id, ..
+                        }) => {
+                            self.mode = Mode::Terminal;
+                            self.sidebar_tree_navigation.query.clear();
+                            self.sidebar_tree_navigation.search_focused = false;
+                            self.sidebar_tree_navigation.search_origin = None;
+                            return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                        }
+                        Some(crate::app::state::NavigatorTarget::Workspace { .. }) | None => {}
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     if self.mode != Mode::Terminal {
@@ -683,10 +702,11 @@ impl AppState {
                     if let Some(press) = &self.workspace_press {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
-                        let can_reorder = self.workspaces.get(press.ws_idx).is_some_and(|ws| {
-                            ws.worktree_space()
-                                .is_none_or(|space| !space.is_linked_worktree)
-                        });
+                        let can_reorder = self.sidebar_tree_navigation.query.is_empty()
+                            && self.workspaces.get(press.ws_idx).is_some_and(|ws| {
+                                ws.worktree_space()
+                                    .is_none_or(|space| !space.is_linked_worktree)
+                            });
                         if can_reorder && delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD {
                             self.drag = Some(DragState {
                                 target: DragTarget::WorkspaceReorder {
@@ -733,13 +753,6 @@ impl AppState {
                                 self.workspace_list_offset_for_drag_row(mouse.row, *grab_row_offset)
                             {
                                 self.set_workspace_list_offset_from_bottom(offset_from_bottom);
-                            }
-                        }
-                        DragTarget::AgentPanelScrollbar { grab_row_offset } => {
-                            if let Some(offset_from_bottom) =
-                                self.agent_panel_offset_for_drag_row(mouse.row, *grab_row_offset)
-                            {
-                                self.set_agent_panel_offset_from_bottom(offset_from_bottom);
                             }
                         }
                         DragTarget::PaneSplit {
@@ -789,9 +802,6 @@ impl AppState {
                         }
                         DragTarget::SidebarDivider => {
                             self.set_manual_sidebar_width(mouse.column);
-                        }
-                        DragTarget::SidebarSectionDivider => {
-                            self.set_sidebar_section_split(mouse.row);
                         }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
@@ -892,6 +902,9 @@ impl AppState {
                     None => {
                         if let Some(press) = workspace_press {
                             self.mode = Mode::Terminal;
+                            self.sidebar_tree_navigation.query.clear();
+                            self.sidebar_tree_navigation.search_focused = false;
+                            self.sidebar_tree_navigation.search_origin = None;
                             return Some(MouseAction::FocusWorkspace {
                                 ws_idx: press.ws_idx,
                             });
@@ -965,38 +978,26 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
-                let agent_area = self.agent_panel_rect();
-                let over_agent_panel = agent_area != Rect::default()
-                    && mouse.row >= agent_area.y
-                    && mouse.row < agent_area.y + agent_area.height;
-                if over_agent_panel {
-                    if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
-                        self, agent_area,
-                    )) {
-                        self.scroll_agent_panel(-1);
-                    }
-                } else if crate::ui::should_show_scrollbar(
-                    crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
-                ) {
+                if self.mode == Mode::Navigate && !self.sidebar_collapsed {
+                    self.move_sidebar_tree_selection_from(terminal_runtimes, -1);
+                } else if crate::ui::should_show_scrollbar(crate::ui::sidebar_tree_scroll_metrics(
+                    self,
+                    terminal_runtimes,
+                    self.workspace_list_rect(),
+                )) {
                     self.scroll_workspace_list(-1);
                 } else {
                     self.move_selected_workspace_by_visible_delta(-1);
                 }
             }
             MouseEventKind::ScrollDown if in_sidebar => {
-                let agent_area = self.agent_panel_rect();
-                let over_agent_panel = agent_area != Rect::default()
-                    && mouse.row >= agent_area.y
-                    && mouse.row < agent_area.y + agent_area.height;
-                if over_agent_panel {
-                    if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
-                        self, agent_area,
-                    )) {
-                        self.scroll_agent_panel(1);
-                    }
-                } else if crate::ui::should_show_scrollbar(
-                    crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
-                ) {
+                if self.mode == Mode::Navigate && !self.sidebar_collapsed {
+                    self.move_sidebar_tree_selection_from(terminal_runtimes, 1);
+                } else if crate::ui::should_show_scrollbar(crate::ui::sidebar_tree_scroll_metrics(
+                    self,
+                    terminal_runtimes,
+                    self.workspace_list_rect(),
+                )) {
                     self.scroll_workspace_list(1);
                 } else {
                     self.move_selected_workspace_by_visible_delta(1);
@@ -1066,6 +1067,56 @@ impl AppState {
                         list: MenuListState::new(0),
                     });
                     self.mode = Mode::ContextMenu;
+                    return None;
+                }
+                match self.sidebar_tree_target_at(mouse.row) {
+                    Some(crate::app::state::NavigatorTarget::Tab { ws_idx, tab_idx }) => {
+                        self.context_menu = Some(ContextMenuState {
+                            kind: ContextMenuKind::Tab { ws_idx, tab_idx },
+                            x: mouse.column,
+                            y: mouse.row,
+                            list: MenuListState::new(0),
+                        });
+                        self.mode = Mode::ContextMenu;
+                    }
+                    Some(crate::app::state::NavigatorTarget::Pane {
+                        ws_idx,
+                        tab_idx,
+                        pane_id,
+                    }) => {
+                        let pane_state = self
+                            .workspaces
+                            .get(ws_idx)
+                            .and_then(|workspace| workspace.tabs.get(tab_idx))
+                            .and_then(|tab| tab.panes.get(&pane_id));
+                        let source_pane_id = self
+                            .workspaces
+                            .get(ws_idx)
+                            .and_then(|workspace| workspace.tabs.get(tab_idx))
+                            .map(|tab| tab.layout.focused())
+                            .filter(|focused| *focused != pane_id);
+                        let has_manual_label = pane_state
+                            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+                            .and_then(|terminal| terminal.manual_label.as_ref())
+                            .is_some();
+                        let right_click_passthrough =
+                            pane_state.is_some_and(|pane| pane.right_click_passthrough);
+                        self.context_menu = Some(ContextMenuState {
+                            kind: ContextMenuKind::Pane {
+                                ws_idx,
+                                tab_idx,
+                                pane_id,
+                                source_pane_id,
+                                has_manual_label,
+                                right_click_passthrough,
+                            },
+                            x: mouse.column,
+                            y: mouse.row,
+                            list: MenuListState::new(0),
+                        });
+                        self.mode = Mode::ContextMenu;
+                    }
+                    Some(crate::app::state::NavigatorTarget::Workspace { .. }) | None => {}
                 }
             }
 
@@ -1935,6 +1986,57 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
         });
+    }
+
+    #[test]
+    fn clicking_sidebar_tree_disclosure_collapses_workspace() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let row = app.state.view.sidebar_tree_row_areas[0];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row.disclosure_rect.x,
+            row.disclosure_rect.y,
+        ));
+
+        let workspace_id = app
+            .state
+            .sidebar_tree_item_id(crate::app::state::NavigatorTarget::Workspace { ws_idx: 0 })
+            .expect("workspace tree id");
+        assert!(app
+            .state
+            .sidebar_tree_navigation
+            .collapsed_nodes
+            .contains(&workspace_id));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        assert_eq!(app.state.view.sidebar_tree_rows.len(), 1);
+    }
+
+    #[test]
+    fn sidebar_wheel_moves_tree_selection_in_navigate_mode() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state
+            .open_sidebar_tree_navigation_from(&app.terminal_runtimes);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let previous_tree_row = app.state.sidebar_tree_navigation.selected;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 1, 2));
+
+        assert_eq!(
+            app.state.sidebar_tree_navigation.selected,
+            previous_tree_row.saturating_sub(1)
+        );
+        assert_eq!(app.state.selected, 0);
     }
 
     #[tokio::test]

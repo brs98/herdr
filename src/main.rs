@@ -191,6 +191,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # previous_agent = ""     # optional, unset by default
 # next_agent = ""         # optional, unset by default
 # focus_agent = ""        # optional indexed binding, e.g. "prefix+alt+1..9"
+# jump_sidebar_item = ""  # optional indexed binding, e.g. ["alt+1..9", "alt+0"]
+# jump_sidebar_item_prompt = "" # optional multi-digit jump prompt, e.g. "alt+j"
 # remote_image_paste = "ctrl+v" # only active in herdr --remote; empty disables raw-key image paste
 # new_tab = "prefix+c"
 # rename_tab = "prefix+shift+t"
@@ -221,14 +223,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_pane_right = ""  # optional, e.g. "ctrl+shift+alt+right"
 # toggle_sidebar = "prefix+b"
 
-# Navigate-mode movement. These local shortcuts win while navigate mode is open.
+# Navigate-mode sidebar tree movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.
 # navigate_workspace_up = "up"
 # navigate_workspace_down = "down"
-# navigate_pane_left = "h"      # left arrow always focuses the pane to the left
+# navigate_pane_left = "h"      # collapse a node or move to its parent
 # navigate_pane_down = "j"
 # navigate_pane_up = "k"
-# navigate_pane_right = "l"     # right arrow always focuses the pane to the right
+# navigate_pane_right = "l"     # expand a node or move to its first child
 
 # Custom commands use the same binding syntax.
 # type = "shell" runs detached in the background.
@@ -244,7 +246,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # height = "80%"
 
 # Legacy indexed shortcut config is still parsed for compatibility.
-# Prefer switch_tab, switch_workspace, and focus_agent for new configs.
+# Prefer switch_tab, switch_workspace, focus_agent, and jump_sidebar_item for new configs.
 # [keys.indexed]
 # tabs = ""       # e.g. "ctrl" makes ctrl+1..9 switch tabs directly
 # workspaces = "" # e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces directly
@@ -340,7 +342,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # tab_bar_right = []
 # tab_bar_right_separator = " "
 
-# Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
+# Agent cycling and compact-list ordering: "spaces" (grouped by space) or
+# "priority" (attention queue). The expanded session tree stays hierarchical.
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"
 
@@ -348,24 +351,26 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # distinct static glyphs for blocked, working, done, idle, and unknown states.
 # status_indicators = "dots"
 
-# Expanded agent rows. Built-ins are state_icon, state_text, workspace, tab, pane, agent,
-# terminal_title, and terminal_title_stripped.
+# Expanded Agent pane-node content. Inner rows are flattened onto the tree node's
+# single terminal line. Built-ins are state_icon, state_text, workspace, tab, pane,
+# agent, terminal_title, and terminal_title_stripped.
 # Custom values reported through pane metadata use a $name token.
 # A token occurrence may be styled with { token = "workspace", fg = "#89b4fa", bold = true, dim = false }.
 # Omitted style fields preserve the contextual default.
 # [ui.sidebar.agents]
-# Blank rows between agent entries. Set to 1 to restore the previous spacing.
+# Retained for configuration compatibility; tree nodes remain one terminal row each.
 # row_gap = 0
 # rows = [["state_icon", "workspace", "tab"], ["agent"]]
 # Optional canonical agent IDs replace the default rows for matching agents.
 # [ui.sidebar.agents.rows_by_agent]
 # claude = [["state_icon", "workspace", "tab"], ["terminal_title_stripped"], ["agent"]]
 
-# Expanded space rows. Built-ins are state_icon, state_text, workspace, branch, and git_status.
+# Expanded workspace-node content. Inner rows are flattened onto the tree node's
+# single terminal line. Built-ins are state_icon, state_text, workspace, branch, and git_status.
 # Custom values reported through workspace metadata use a $name token, for example $jj_status.
 # Inline token styles accept strict #RGB/#RRGGBB foregrounds plus bold and dim booleans.
 # [ui.sidebar.spaces]
-# Blank rows between space entries. Set to 1 to restore the previous spacing.
+# Retained for configuration compatibility; tree nodes remain one terminal row each.
 # row_gap = 0
 # rows = [["state_icon", "workspace"], ["branch", "git_status"]]
 
