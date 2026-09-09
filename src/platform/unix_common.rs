@@ -1,5 +1,55 @@
 use std::path::{Path, PathBuf};
 
+pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
+    if status.signal().is_some() {
+        super::ChildExitReason::Interrupted
+    } else {
+        super::ChildExitReason::Exited
+    }
+}
+
+pub(crate) fn wait_client_stream_readable(stream: &crate::ipc::LocalStream) -> std::io::Result<()> {
+    use std::os::fd::{AsFd as _, AsRawFd as _};
+    let crate::ipc::LocalStream::UdSocket(stream) = stream;
+    let mut descriptor = libc::pollfd {
+        fd: stream.as_fd().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Bound cancellation latency without polling idle connections hundreds of times per second.
+    let result = unsafe { libc::poll(&mut descriptor, 1, 100) };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn read_terminal_grid_size() -> std::io::Result<(u16, u16)> {
+    crossterm::terminal::window_size().map(|size| (size.columns, size.rows))
+}
+
+fn set_sigpipe_disposition(handler: libc::sighandler_t) {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = handler;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        // Rust starts with SIGPIPE ignored. If this best-effort transition
+        // fails, stdout retains the existing Rust behavior.
+        libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut());
+    }
+}
+
+pub(crate) fn begin_cli_output() {
+    set_sigpipe_disposition(libc::SIG_DFL);
+}
+
+pub(crate) fn end_cli_output() {
+    set_sigpipe_disposition(libc::SIG_IGN);
+}
+
 pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     super::RemoteSshConfigPaths {
         user_config: std::env::var_os("HOME")
@@ -174,8 +224,8 @@ impl StatusCommandGuard {
     }
 }
 
-impl Drop for StatusCommandGuard {
-    fn drop(&mut self) {
+impl StatusCommandGuard {
+    pub(crate) fn terminate(&mut self) {
         if let Some(process_group_id) = self.process_group_id.take() {
             // The command was spawned as this process group's leader. Killing the
             // group also cleans up background descendants on completion/cancellation.
@@ -183,6 +233,12 @@ impl Drop for StatusCommandGuard {
                 libc::kill(-process_group_id, libc::SIGKILL);
             }
         }
+    }
+}
+
+impl Drop for StatusCommandGuard {
+    fn drop(&mut self) {
+        self.terminate();
     }
 }
 
@@ -203,9 +259,27 @@ fn datetime_from_tm(value: &libc::tm) -> Option<time::PrimitiveDateTime> {
     Some(time::PrimitiveDateTime::new(date, time))
 }
 
+pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: &std::path::Path) {
+    if !env.iter().any(|(key, _)| key == "PWD") {
+        env.push(("PWD".to_string(), cwd.display().to_string()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_pane_pwd_defaults_to_cwd_without_overriding_explicit_env() {
+        let cwd = Path::new("/plugin-cwd");
+        let mut derived = vec![("OTHER".to_string(), "value".to_string())];
+        set_default_plugin_pane_pwd(&mut derived, cwd);
+        assert!(derived.contains(&("PWD".to_string(), "/plugin-cwd".to_string())));
+
+        let mut explicit = vec![("PWD".to_string(), "/caller-pwd".to_string())];
+        set_default_plugin_pane_pwd(&mut explicit, cwd);
+        assert_eq!(explicit, [("PWD".to_string(), "/caller-pwd".to_string())]);
+    }
 
     #[test]
     fn remote_ssh_config_dir_rejects_overlong_control_socket_name() {

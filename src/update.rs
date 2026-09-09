@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 use std::env;
-#[cfg(not(windows))]
 use std::fs;
 #[cfg(not(windows))]
 use std::io;
@@ -125,6 +124,8 @@ impl UpdateChannel {
 struct AssetRef {
     url: String,
     sha256: Option<String>,
+    #[cfg(windows)]
+    format: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for AssetRef {
@@ -137,6 +138,8 @@ impl<'de> Deserialize<'de> for AssetRef {
             serde_json::Value::String(url) if !url.trim().is_empty() => Ok(Self {
                 url: url.trim().to_string(),
                 sha256: None,
+                #[cfg(windows)]
+                format: None,
             }),
             serde_json::Value::Object(mut object) => {
                 let url = object
@@ -146,12 +149,18 @@ impl<'de> Deserialize<'de> for AssetRef {
                 let sha256 = object
                     .remove("sha256")
                     .and_then(|value| value.as_str().map(str::to_string));
+                #[cfg(windows)]
+                let format = object
+                    .remove("format")
+                    .and_then(|value| value.as_str().map(str::to_string));
                 if url.trim().is_empty() {
                     return Err(serde::de::Error::custom("asset url must not be empty"));
                 }
                 Ok(Self {
                     url: url.trim().to_string(),
                     sha256: sha256.filter(|value| !value.trim().is_empty()),
+                    #[cfg(windows)]
+                    format: format.filter(|value| !value.trim().is_empty()),
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -161,9 +170,35 @@ impl<'de> Deserialize<'de> for AssetRef {
     }
 }
 
+#[cfg(windows)]
+impl AssetRef {
+    fn package_format(&self) -> Result<String, String> {
+        let format = self
+            .format
+            .clone()
+            .unwrap_or_else(|| {
+                if self.url.to_ascii_lowercase().ends_with(".zip") {
+                    "zip"
+                } else {
+                    "exe"
+                }
+                .into()
+            })
+            .to_ascii_lowercase();
+        match format.as_str() {
+            "zip" | "exe" => Ok(format),
+            _ => Err(format!(
+                "update manifest asset has unsupported format '{format}'"
+            )),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct UpdateManifest {
     version: String,
+    #[cfg(not(windows))]
+    endpoint_generation: Option<u32>,
     /// Thin-client protocol spoken by this release, when advertised by the manifest.
     #[cfg(not(windows))]
     protocol: Option<u32>,
@@ -203,6 +238,7 @@ struct PreviewManifest {
     commit: String,
     built_at: String,
     protocol: u32,
+    endpoint_generation: Option<u32>,
     notes: String,
     assets: BTreeMap<String, AssetRef>,
     #[serde(default)]
@@ -215,6 +251,7 @@ struct PreviewBuildMetadata {
     commit: String,
     built_at: String,
     protocol: u32,
+    endpoint_generation: Option<u32>,
     assets: BTreeMap<String, AssetRef>,
 }
 
@@ -273,8 +310,12 @@ struct ReleaseInfo {
     commit: Option<String>,
     #[cfg(not(windows))]
     target_protocol: Option<u32>,
+    #[cfg(not(windows))]
+    target_endpoint_generation: Option<u32>,
     download_url: String,
     sha256: Option<String>,
+    #[cfg(windows)]
+    package_format: String,
     notes_body: String,
 }
 
@@ -380,8 +421,12 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
         commit: None,
         #[cfg(not(windows))]
         target_protocol: manifest.protocol,
+        #[cfg(not(windows))]
+        target_endpoint_generation: manifest.endpoint_generation,
         download_url,
         sha256: Some(sha256),
+        #[cfg(windows)]
+        package_format: asset.package_format()?,
         notes_body,
     }))
 }
@@ -438,6 +483,7 @@ fn release_info_from_preview_manifest(
             || archived.commit != manifest.commit
             || archived.built_at != manifest.built_at
             || archived.protocol != manifest.protocol
+            || archived.endpoint_generation != manifest.endpoint_generation
         {
             tracing::warn!(
                 build_id,
@@ -465,13 +511,25 @@ fn release_info_from_preview_manifest(
         commit: Some(manifest.commit.clone()),
         #[cfg(not(windows))]
         target_protocol: Some(manifest.protocol),
+        #[cfg(not(windows))]
+        target_endpoint_generation: manifest.endpoint_generation,
         download_url,
         sha256: asset.sha256.clone(),
+        #[cfg(windows)]
+        package_format: asset.package_format()?,
         notes_body,
     }))
 }
 
 /// Check the hosted update manifest for the latest release. Returns release info if newer.
+fn first_windows_stable_is_pending(
+    manifest: &UpdateManifest,
+    is_windows: bool,
+    installed_is_preview: bool,
+) -> bool {
+    is_windows && installed_is_preview && !manifest.assets.contains_key("windows-x86_64")
+}
+
 fn check_latest() -> Result<Option<ReleaseInfo>, String> {
     let channel = UpdateChannel::configured();
     if channel == UpdateChannel::Preview {
@@ -479,6 +537,10 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
     }
 
     let manifest = fetch_update_manifest()?;
+    if first_windows_stable_is_pending(&manifest, cfg!(windows), crate::build_info::is_preview()) {
+        tracing::info!("waiting for the first stable Windows release");
+        return Ok(None);
+    }
     let release = release_info_from_manifest(&manifest)?;
     if let Some(release) = &release {
         if let Some(metadata) = manifest.metadata_for_version(&release.version) {
@@ -637,29 +699,81 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
 }
 
 #[cfg(windows)]
+const WINDOWS_INSTALLER: &str = include_str!("../distribution/install.ps1");
+
+#[cfg(windows)]
+struct DownloadedWindowsUpdate {
+    package_path: PathBuf,
+    installer_path: PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for DownloadedWindowsUpdate {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.package_path);
+        let _ = fs::remove_file(&self.installer_path);
+    }
+}
+
+#[cfg(windows)]
+fn download_windows_update(release: &ReleaseInfo) -> Result<DownloadedWindowsUpdate, String> {
+    let expected_sha256 = release
+        .sha256
+        .as_deref()
+        .ok_or("Windows update asset is missing a SHA-256 checksum")?;
+    let stem = format!("herdr-update-{}", std::process::id());
+    let update = DownloadedWindowsUpdate {
+        package_path: env::temp_dir().join(format!("{stem}.{}", release.package_format)),
+        installer_path: env::temp_dir().join(format!("{stem}.ps1")),
+    };
+    fs::write(&update.installer_path, WINDOWS_INSTALLER)
+        .map_err(|err| format!("failed to prepare Windows installer: {err}"))?;
+
+    let status = crate::noninteractive_process::curl_command()
+        .args(["-sfL", "--max-time", "120", "-o"])
+        .arg(&update.package_path)
+        .arg(&release.download_url)
+        .status()
+        .map_err(|err| format!("download failed: {err}"))?;
+    if !status.success() {
+        return Err("download failed".into());
+    }
+    crate::checksum::verify_sha256(&update.package_path, expected_sha256)
+        .map_err(|err| format!("downloaded update checksum verification failed: {err}"))?;
+    tracing::info!(sha256 = %expected_sha256, "downloaded update checksum verified");
+
+    Ok(update)
+}
+
+#[cfg(windows)]
 fn install_windows_update_with_installer(
-    channel: UpdateChannel,
-    expected_build_id: Option<&str>,
+    release: &ReleaseInfo,
+    update: &DownloadedWindowsUpdate,
 ) -> Result<(), String> {
+    let expected_sha256 = release
+        .sha256
+        .as_deref()
+        .ok_or("Windows update asset is missing a SHA-256 checksum")?;
     let mut command = Command::new("powershell");
     command
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&update.installer_path)
+        .args(["-Channel", release.channel.as_str(), "-LocalPackagePath"])
+        .arg(&update.package_path)
         .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "irm https://herdr.dev/install.ps1 | iex",
+            "-LocalPackageFormat",
+            &release.package_format,
+            "-LocalPackageIdentity",
+            release.label(),
+            "-LocalPackageSha256",
+            expected_sha256,
         ])
-        .env("HERDR_CHANNEL", channel.as_str())
         // Drop any inherited PSModulePath. When herdr is launched from
         // PowerShell 7, its Core module paths come first and Windows
         // PowerShell 5.1 (this `powershell`) fails to autoload cmdlets like
         // Get-FileHash. Removing it lets 5.1 compute its own default path.
         // See PowerShell/PowerShell#8635.
         .env_remove("PSModulePath");
-    if let Some(build_id) = expected_build_id {
-        command.env("HERDR_EXPECTED_BUILD_ID", build_id);
-    }
     let status = command
         .status()
         .map_err(|err| format!("failed to run Windows installer: {err}"))?;
@@ -722,10 +836,14 @@ fn update_requires_server_restart(
     server: &crate::api::RuntimeStatus,
     release: &ReleaseInfo,
 ) -> bool {
-    match (server.protocol, release.target_protocol) {
-        (Some(server_protocol), Some(target_protocol)) => server_protocol != target_protocol,
-        _ => true,
-    }
+    let Some(target_generation) = release.target_endpoint_generation else {
+        return true;
+    };
+    server
+        .capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.endpoint_protocol_generation)
+        != Some(target_generation)
 }
 
 #[cfg(not(windows))]
@@ -800,6 +918,7 @@ enum RunningServerUpdateAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(not(windows))]
 enum RunningServerUpdateOutcome {
+    CompatibleServerKept,
     RestartDeferred,
     Stopped,
     LiveHandoffComplete,
@@ -1126,7 +1245,12 @@ fn prompt_to_complete_plain_update(
     decisions: &[RunningServerUpdateDecision],
     release: &ReleaseInfo,
 ) -> Result<bool, String> {
-    if decisions.is_empty() {
+    let plans: Vec<&RunningServerUpdatePlan> = decisions
+        .iter()
+        .filter(|decision| decision.plan.requires_server_restart)
+        .map(|decision| &decision.plan)
+        .collect();
+    if plans.is_empty() {
         return Ok(true);
     }
 
@@ -1134,8 +1258,6 @@ fn prompt_to_complete_plain_update(
         return Ok(false);
     }
 
-    let plans: Vec<&RunningServerUpdatePlan> =
-        decisions.iter().map(|decision| &decision.plan).collect();
     let (singular, plural) = target_group_nouns(&plans);
     let noun = if plans.len() == 1 { singular } else { plural };
     eprintln!(
@@ -1185,7 +1307,9 @@ fn mark_plain_update_stop_decisions(
     decisions
         .into_iter()
         .map(|mut decision| {
-            decision.action = RunningServerUpdateAction::StopOldServer;
+            if decision.plan.requires_server_restart {
+                decision.action = RunningServerUpdateAction::StopOldServer;
+            }
             decision
         })
         .collect()
@@ -1616,7 +1740,10 @@ fn apply_running_session_update_decisions(
 
     for decision in decisions {
         let outcome = match decision.action {
-            RunningServerUpdateAction::None => RunningServerUpdateOutcome::RestartDeferred,
+            RunningServerUpdateAction::None if decision.plan.requires_server_restart => {
+                RunningServerUpdateOutcome::RestartDeferred
+            }
+            RunningServerUpdateAction::None => RunningServerUpdateOutcome::CompatibleServerKept,
             RunningServerUpdateAction::StopOldServer => {
                 stop_running_server_for_update(&decision.plan)?;
                 RunningServerUpdateOutcome::Stopped
@@ -1657,6 +1784,24 @@ fn print_running_session_update_outcomes(
 
     for outcome in outcomes {
         match outcome.outcome {
+            RunningServerUpdateOutcome::CompatibleServerKept => {
+                eprintln!(
+                    "{} {} kept running server v{}.",
+                    outcome.target_noun,
+                    outcome.session_label,
+                    version_label(outcome.server_version.as_deref())
+                );
+                match &outcome.attach_command {
+                    Some(command) => eprintln!(
+                        "Run `{command}` to reconnect with the updated client. Restart the server later only if you need server-side changes from {}.",
+                        release.label()
+                    ),
+                    None => eprintln!(
+                        "Reconnect with the same socket override to use the updated client. Restart the server later only if you need server-side changes from {}.",
+                        release.label()
+                    ),
+                }
+            }
             RunningServerUpdateOutcome::LiveHandoffComplete => {
                 if let Some(command) = &outcome.attach_command {
                     eprintln!(
@@ -1755,19 +1900,19 @@ pub(crate) fn update_install_command() -> &'static str {
 pub(crate) fn update_install_instruction(install_command: &str) -> String {
     match install_command {
         HERDR_UPDATE_COMMAND => {
-            "detach, run `herdr update`, then follow its restart guidance".to_string()
+            "detach, run `herdr update`, then run Herdr again to reconnect".to_string()
         }
         HOMEBREW_UPDATE_COMMAND => {
-            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready".to_string()
-        }
-        MISE_UPDATE_COMMAND => {
-            "detach, run `mise upgrade herdr`, then restart this Herdr session when ready"
+            "detach, run `brew update && brew upgrade herdr`, then run Herdr again to reconnect"
                 .to_string()
         }
-        NIX_UPDATE_COMMAND => {
-            "detach, update through Nix, then restart this Herdr session when ready".to_string()
+        MISE_UPDATE_COMMAND => {
+            "detach, run `mise upgrade herdr`, then run Herdr again to reconnect".to_string()
         }
-        command => format!("detach, run `{command}`, then restart this Herdr session when ready"),
+        NIX_UPDATE_COMMAND => {
+            "detach, update through Nix, then run Herdr again to reconnect".to_string()
+        }
+        command => format!("detach, run `{command}`, then run Herdr again to reconnect"),
     }
 }
 
@@ -1967,12 +2112,6 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     let channel = UpdateChannel::configured();
-    #[cfg(windows)]
-    if channel == UpdateChannel::Stable {
-        return Err(
-            "Windows builds are preview-only for now; run `herdr channel set preview`".into(),
-        );
-    }
 
     if is_homebrew_managed_install() {
         if channel == UpdateChannel::Preview {
@@ -2041,12 +2180,15 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         if let Some(sha256) = &release.sha256 {
             tracing::debug!(sha256 = %sha256, "selected Windows update asset has checksum");
         }
-        install_windows_update_with_installer(channel, release.build_id.as_deref())?;
+        eprintln!("downloading {}...", release.label());
+        let downloaded_update = download_windows_update(&release)?;
+        eprintln!("downloaded {}", release.label());
+        install_windows_update_with_installer(&release, &downloaded_update)?;
         let updated_exe = windows_installed_herdr_exe_path()?;
         eprintln!("installed {}", release.label());
         print_outdated_integration_notice_with_updated_binary(&updated_exe);
         eprintln!(
-            "Restart any running Herdr sessions to use {}.",
+            "Open a new terminal, or reconnect SSH, then start Herdr again to use the updated client. Running servers remain active; restart them later only if you need server-side changes from {}.",
             release.label()
         );
     }
@@ -2332,6 +2474,9 @@ mod tests {
             build_id: None,
             commit: None,
             target_protocol,
+            target_endpoint_generation: Some(
+                crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+            ),
             download_url: "https://example.com/herdr".to_string(),
             sha256: None,
             notes_body: "### Changed\n- One".to_string(),
@@ -2611,15 +2756,15 @@ mod tests {
     fn update_install_instruction_distinguishes_install_from_restart() {
         assert_eq!(
             update_install_instruction(HERDR_UPDATE_COMMAND),
-            "detach, run `herdr update`, then follow its restart guidance"
+            "detach, run `herdr update`, then run Herdr again to reconnect"
         );
         assert_eq!(
             update_install_instruction(HOMEBREW_UPDATE_COMMAND),
-            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
+            "detach, run `brew update && brew upgrade herdr`, then run Herdr again to reconnect"
         );
         assert_eq!(
             update_install_instruction(MISE_UPDATE_COMMAND),
-            "detach, run `mise upgrade herdr`, then restart this Herdr session when ready"
+            "detach, run `mise upgrade herdr`, then run Herdr again to reconnect"
         );
     }
 
@@ -2696,41 +2841,62 @@ mod tests {
     }
 
     #[test]
-    fn update_requires_server_restart_when_target_protocol_differs_or_unknown() {
-        let server = crate::api::RuntimeStatus {
+    fn update_requires_server_restart_only_without_the_endpoint_baseline() {
+        let release = fake_release("0.5.6", Some(4));
+        let compatible = crate::api::RuntimeStatus {
             version: Some("0.5.5".to_string()),
             protocol: Some(2),
+            capabilities: Some(crate::api::schema::ServerCapabilities {
+                live_handoff: true,
+                detached_server_daemon: true,
+                endpoint_protocol_generation: Some(
+                    crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+                ),
+                surface_interest: true,
+                health_check: true,
+            }),
+        };
+        let missing_baseline = crate::api::RuntimeStatus {
             capabilities: None,
+            ..compatible.clone()
         };
-        let compatible_release = ReleaseInfo {
-            version: Version::parse("0.5.6").unwrap(),
-            identity: "0.5.6".to_string(),
-            channel: UpdateChannel::Stable,
-            build_id: None,
-            commit: None,
-            target_protocol: Some(2),
-            download_url: "https://example.com/herdr".to_string(),
-            sha256: None,
-            notes_body: "### Changed\n- One".to_string(),
-        };
-        let incompatible_release = ReleaseInfo {
-            target_protocol: Some(4),
-            ..compatible_release.clone()
-        };
-        let unknown_release = ReleaseInfo {
-            target_protocol: None,
-            ..compatible_release.clone()
+        let incompatible_generation = crate::api::RuntimeStatus {
+            capabilities: Some(crate::api::schema::ServerCapabilities {
+                endpoint_protocol_generation: Some(
+                    crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION + 1,
+                ),
+                ..compatible.capabilities.clone().unwrap()
+            }),
+            ..compatible.clone()
         };
 
-        assert!(!update_requires_server_restart(
-            &server,
-            &compatible_release
+        assert!(!update_requires_server_restart(&compatible, &release));
+        assert!(update_requires_server_restart(&missing_baseline, &release));
+        assert!(update_requires_server_restart(
+            &incompatible_generation,
+            &release
+        ));
+
+        let unknown_release = ReleaseInfo {
+            target_endpoint_generation: None,
+            ..release.clone()
+        };
+        assert!(update_requires_server_restart(
+            &compatible,
+            &unknown_release
         ));
         assert!(update_requires_server_restart(
-            &server,
-            &incompatible_release
+            &missing_baseline,
+            &unknown_release
         ));
-        assert!(update_requires_server_restart(&server, &unknown_release));
+
+        let future_release = ReleaseInfo {
+            target_endpoint_generation: Some(
+                crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION + 1,
+            ),
+            ..release
+        };
+        assert!(update_requires_server_restart(&compatible, &future_release));
     }
 
     #[test]
@@ -2757,6 +2923,11 @@ mod tests {
                 capabilities: Some(crate::api::schema::ServerCapabilities {
                     live_handoff: true,
                     detached_server_daemon: true,
+                    endpoint_protocol_generation: Some(
+                        crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+                    ),
+                    surface_interest: true,
+                    health_check: true,
                 }),
             },
         };
@@ -2870,9 +3041,8 @@ mod tests {
         let work_client_socket = crate::session::client_socket_path_for(Some("work"));
         fs::create_dir_all(work_client_socket.parent().unwrap()).unwrap();
         let work_client_listener = UnixListener::bind(&work_client_socket).unwrap();
-        let release = fake_release("9.8.7", Some(77));
 
-        let err = plan_running_server_updates(&release).unwrap_err();
+        let err = plan_running_server_updates(&fake_release("9.8.7", Some(77))).unwrap_err();
 
         drop(work_client_listener);
         let _ = fs::remove_dir_all(config_home);
@@ -2951,6 +3121,9 @@ mod tests {
             build_id: None,
             commit: None,
             target_protocol: Some(3),
+            target_endpoint_generation: Some(
+                crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+            ),
             download_url: "https://example.com/herdr".to_string(),
             sha256: None,
             notes_body: "### Changed\n- One".to_string(),
@@ -2982,6 +3155,52 @@ mod tests {
         assert!(!complete);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
+    }
+
+    #[test]
+    fn noninteractive_plain_update_completes_with_compatible_server() {
+        assert!(
+            !io::stdin().is_terminal(),
+            "this test relies on noninteractive test stdin"
+        );
+        let release = fake_release("9.8.7", Some(77));
+        let plan = RunningServerUpdatePlan {
+            target: RunningUpdateTarget {
+                name: Some("work".to_string()),
+                label: "work".to_string(),
+                stop_command: "herdr session stop work".to_string(),
+                attach_command: Some("herdr session attach work".to_string()),
+                socket_path: crate::session::api_socket_path_for(Some("work")),
+                client_socket_path: crate::session::client_socket_path_for(Some("work")),
+                must_be_running: true,
+            },
+            requires_server_restart: false,
+            server: crate::api::RuntimeStatus {
+                version: Some("9.8.6".to_string()),
+                protocol: Some(76),
+                capabilities: Some(crate::api::schema::ServerCapabilities {
+                    live_handoff: true,
+                    detached_server_daemon: true,
+                    endpoint_protocol_generation: Some(
+                        crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+                    ),
+                    surface_interest: true,
+                    health_check: true,
+                }),
+            },
+        };
+        let decisions = confirm_running_server_update_action(
+            vec![plan],
+            &release,
+            SelfUpdateOptions {
+                live_handoff: false,
+            },
+        )
+        .unwrap();
+
+        assert!(prompt_to_complete_plain_update(&decisions, &release).unwrap());
+        let decisions = mark_plain_update_stop_decisions(decisions);
+        assert_eq!(decisions[0].action, RunningServerUpdateAction::None);
     }
 
     #[test]
@@ -3086,6 +3305,9 @@ mod tests {
             build_id: None,
             commit: None,
             target_protocol: Some(77),
+            target_endpoint_generation: Some(
+                crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+            ),
             download_url: "https://example.com/herdr".to_string(),
             sha256: None,
             notes_body: "### Changed\n- One".to_string(),
@@ -3196,6 +3418,7 @@ mod tests {
         let json = "{\n\
             \"version\": \"0.2.0\",\n\
             \"protocol\": 4,\n\
+            \"endpoint_generation\": 1,\n\
             \"notes\": \"### Changed\\n- One\",\n\
             \"announcement\": {\n\
                 \"id\": \"keymap-v2\",\n\
@@ -3210,6 +3433,7 @@ mod tests {
         let manifest: UpdateManifest = serde_json::from_str(json).unwrap();
         assert_eq!(manifest.version, "0.2.0");
         assert_eq!(manifest.protocol, Some(4));
+        assert_eq!(manifest.endpoint_generation, Some(1));
         assert_eq!(manifest.assets.len(), 2);
         assert_eq!(
             manifest
@@ -3459,30 +3683,59 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_website_manifest_matches_update_schema() {
+    fn preview_windows_build_waits_for_first_stable_asset() {
+        let without_windows: UpdateManifest = serde_json::from_str(
+            r#"{"version":"9.9.9","notes":"notes","assets":{},"announcement":null}"#,
+        )
+        .unwrap();
+        assert!(first_windows_stable_is_pending(
+            &without_windows,
+            true,
+            true
+        ));
+        assert!(!first_windows_stable_is_pending(
+            &without_windows,
+            true,
+            false
+        ));
+        assert!(!first_windows_stable_is_pending(
+            &without_windows,
+            false,
+            true
+        ));
+
+        let with_windows: UpdateManifest = serde_json::from_str(
+            r#"{"version":"9.9.9","notes":"notes","assets":{"windows-x86_64":"https://example.com/herdr-windows-x86_64.zip"},"announcement":null}"#,
+        )
+        .unwrap();
+        assert!(!first_windows_stable_is_pending(&with_windows, true, true));
+    }
+
+    #[test]
+    fn checked_in_distribution_manifest_matches_update_schema() {
         #[derive(Deserialize)]
         struct LegacyUpdateManifest {
             assets: BTreeMap<String, String>,
         }
 
-        let json = include_str!("../website/latest.json");
+        let json = include_str!("../distribution/latest.json");
         let legacy: LegacyUpdateManifest = serde_json::from_str(json)
-            .expect("website/latest.json should keep legacy string asset URLs");
-        assert_eq!(legacy.assets.len(), 4);
+            .expect("distribution/latest.json should keep legacy string asset URLs");
+        assert!(legacy.assets.len() >= 4);
 
-        let manifest: UpdateManifest =
-            serde_json::from_str(json).expect("website/latest.json should match updater schema");
+        let manifest: UpdateManifest = serde_json::from_str(json)
+            .expect("distribution/latest.json should match updater schema");
 
         assert!(!manifest
             .metadata_for_version(&Version::parse(&manifest.version).unwrap())
             .expect("metadata")
             .notes_body()
             .is_empty());
-        // website/latest.json describes the latest released binaries, not the
+        // distribution/latest.json describes the latest released binaries, not the
         // current unreleased checkout. Its protocol is updated by the release
         // flow together with the release assets.
         assert!(manifest.protocol.is_some());
-        assert_eq!(manifest.assets.len(), 4);
+        assert!(manifest.assets.len() >= 4);
         assert!(manifest.releases.contains_key(&manifest.version));
 
         for target in [
@@ -3508,6 +3761,15 @@ mod tests {
             assert!(
                 url.ends_with(&format!("herdr-{target}")),
                 "unexpected asset name for {target}: {url}"
+            );
+        }
+
+        if let Some(windows) = manifest.assets.get("windows-x86_64") {
+            assert!(windows.url.ends_with("/herdr-windows-x86_64.zip"));
+            assert_eq!(
+                manifest.sha256.get("windows-x86_64").map(String::len),
+                Some(64),
+                "missing SHA-256 checksum for windows-x86_64"
             );
         }
 
@@ -3537,6 +3799,19 @@ mod tests {
                     url.ends_with(&format!("herdr-{target}")),
                     "unexpected asset name for {version} {target}: {url}"
                 );
+            }
+            if let Some(windows) = assets.get("windows-x86_64") {
+                let windows: AssetRef = serde_json::from_value(windows.clone())
+                    .unwrap_or_else(|_| panic!("invalid Windows asset for release {version}"));
+                assert!(windows.url.ends_with("/herdr-windows-x86_64.zip"));
+                let checksums = release
+                    .get("sha256")
+                    .and_then(serde_json::Value::as_object)
+                    .unwrap_or_else(|| panic!("missing checksums for release {version}"));
+                assert!(checksums
+                    .get("windows-x86_64")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value.len() == 64));
             }
         }
     }

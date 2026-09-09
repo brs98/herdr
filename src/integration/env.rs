@@ -16,6 +16,7 @@ pub(crate) const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 pub(crate) const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
 pub(crate) const COPILOT_HOME_ENV_VAR: &str = "COPILOT_HOME";
 pub(crate) const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
+pub(crate) const QWEN_HOME_ENV_VAR: &str = "QWEN_HOME";
 pub(crate) const CURSOR_CONFIG_DIR_ENV_VAR: &str = "CURSOR_CONFIG_DIR";
 pub(crate) const ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR: &str = "ANTIGRAVITY_CLI_CONFIG_DIR";
 pub(crate) const GROK_CONFIG_DIR_ENV_VAR: &str = "GROK_CONFIG_DIR";
@@ -73,6 +74,11 @@ pub(crate) fn copilot_dir() -> io::Result<PathBuf> {
 pub(crate) fn devin_dir() -> io::Result<PathBuf> {
     if let Some(value) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         return expand_tilde_path(PathBuf::from(value)).map(|path| path.join("devin"));
+    }
+
+    #[cfg(windows)]
+    if let Some(value) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(value).join("devin"));
     }
 
     Ok(home_dir()?.join(".config").join("devin"))
@@ -157,6 +163,10 @@ pub(crate) fn qodercli_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(QODERCLI_CONFIG_DIR_ENV_VAR, &[".qoder"])
 }
 
+pub(crate) fn qwen_dir() -> io::Result<PathBuf> {
+    config_dir_from_env_or_home(QWEN_HOME_ENV_VAR, &[".qwen"])
+}
+
 pub(crate) fn cursor_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CURSOR_CONFIG_DIR_ENV_VAR, &[".cursor"])
 }
@@ -210,7 +220,31 @@ pub(crate) fn home_dir() -> io::Result<PathBuf> {
 }
 
 #[cfg(test)]
-pub(crate) fn integration_env_lock() -> MutexGuard<'static, ()> {
+pub(crate) struct IntegrationEnvLock {
+    _guard: MutexGuard<'static, ()>,
+    #[cfg(windows)]
+    appdata: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl Drop for IntegrationEnvLock {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(appdata) = self.appdata.take() {
+            std::env::set_var("APPDATA", appdata);
+        } else {
+            std::env::remove_var("APPDATA");
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn integration_env_lock() -> IntegrationEnvLock {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    let guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    IntegrationEnvLock {
+        _guard: guard,
+        #[cfg(windows)]
+        appdata: std::env::var_os("APPDATA"),
+    }
 }
