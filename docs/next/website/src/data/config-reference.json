@@ -1006,6 +1006,12 @@
           "description": "Hide the tab row when the workspace has one tab."
         },
         {
+          "key": "ui.hide_tab_bar",
+          "type": "boolean",
+          "default": "false",
+          "description": "Hide the desktop tab row regardless of tab count or position. Tabs remain accessible through the sidebar and configured keybindings. Takes precedence over hide_tab_bar_when_single_tab."
+        },
+        {
           "key": "ui.tab_bar_position",
           "type": "enum",
           "default": "\"top\"",

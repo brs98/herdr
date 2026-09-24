@@ -77,6 +77,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) mobile_width_threshold: u16,
     pub(super) tab_bar_position: TabBarPositionConfig,
     pub(super) hide_tab_bar_when_single_tab: bool,
+    pub(super) hide_tab_bar: bool,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
@@ -406,6 +407,8 @@ pub(super) enum ClientNavigatorTarget {
 
 #[derive(Clone, Debug)]
 pub(super) struct ClientNavigatorRow {
+    /// A space row can also represent its sole pane without losing space actions.
+    pub(super) sole_pane_id: Option<String>,
     pub(super) depth: u8,
     pub(super) label: String,
     pub(super) meta: String,
@@ -413,6 +416,24 @@ pub(super) struct ClientNavigatorRow {
     pub(super) stale: bool,
     pub(super) current: bool,
     pub(super) target: ClientNavigatorTarget,
+}
+
+impl ClientNavigatorRow {
+    pub(super) fn represents_pane(&self) -> bool {
+        self.sole_pane_id.is_some() || matches!(self.target, ClientNavigatorTarget::Pane { .. })
+    }
+
+    pub(super) fn sole_pane_target(&self) -> Option<ClientNavigatorTarget> {
+        let ClientNavigatorTarget::Workspace { endpoint_id, .. } = &self.target else {
+            return None;
+        };
+        self.sole_pane_id
+            .as_ref()
+            .map(|pane_id| ClientNavigatorTarget::Pane {
+                endpoint_id: endpoint_id.clone(),
+                pane_id: pane_id.clone(),
+            })
+    }
 }
 
 #[derive(Debug)]

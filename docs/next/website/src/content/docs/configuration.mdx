@@ -308,9 +308,11 @@ The active palette is applied in this order: built-in theme, `[theme.custom]`, t
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. Its expanded desktop view is one session tree: workspaces contain tabs, and tabs contain shell or Agent panes. When several machines are connected, machine rows group their sessions. A tab with one pane is condensed into one pane row; a split tab shows an unnumbered, selectable tab row with each numbered pane beneath it. Clicking or selecting a workspace, tab, or pane focuses it. Press `prefix+w` to focus the tree from the keyboard, then use `j`/`k`, `h`/`l`, Enter, and `/` for movement, collapse/expand, activation, and inline filtering. In Navigate mode, the selected row uses the active theme accent; outside Navigate mode, the currently focused pane keeps that accent background. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, mouse behavior, pane borders, and other presentation settings. `ui.agent_panel_sort` still controls Agent cycling and the compact collapsed rail; it does not reorder the hierarchical tree.
+The sidebar is the main Herdr dashboard. Its expanded desktop view is one session tree: workspaces contain tabs, and tabs contain shell or Agent panes. When several machines are connected, machine rows group their sessions and use the theme accent color. Tab headings appear only when a space has multiple tabs and the tab does not contain exactly one pane. A single-pane tab shows the pane name directly beneath its space; a space with one tab also shows its panes directly beneath the space name. A space with exactly one tab and one pane uses a single numbered row with the space name, retaining pane focus, status, and shortcuts. Tabs with multiple panes in multi-tab spaces retain an unnumbered, selectable heading with numbered panes beneath it. Pane labels prefer the explicit pane name, then the pane title, and otherwise use `pane N`; agent types are not used as fallback names. Clicking or selecting a workspace, tab, or pane focuses it. Press `prefix+w` to focus the tree from the keyboard, then use `j`/`k`, `h`/`l`, Enter, and `/` for movement, collapse/expand, activation, and inline filtering. In Navigate mode, the selected row uses the active theme accent; outside Navigate mode, the currently focused pane keeps that accent background. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, mouse behavior, pane borders, and other presentation settings. `ui.agent_panel_sort` still controls Agent cycling and the compact collapsed rail; it does not reorder the hierarchical tree.
 
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
+
+Set `hide_tab_bar = true` under `[ui]` to hide the desktop tab row regardless of tab count or position. Tabs remain accessible through the sidebar and configured keybindings. This takes precedence over `hide_tab_bar_when_single_tab`. Both options default to `false`.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
@@ -401,6 +403,21 @@ Space rows accept these built-in tokens:
 - `$name` — custom workspace metadata named `name`.
 
 Tokens render in their configured order. Herdr normally separates adjacent values with ` · ` and uses a single space after `state_icon`. Missing values and their separators disappear; inner arrays with no values contribute nothing to the node line. Each layout may contain at most 16 inner arrays, with at most 16 tokens in each array. Existing custom rows remain unchanged, so add `machine` explicitly if you want machine identity in a custom multi-machine layout.
+
+For a name-only tree without repeated parent names or agent types, keep only the
+item name and optional status icon in each configured row:
+
+```toml
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"]]
+
+[ui.sidebar.agents]
+rows = [["state_icon", "pane"]]
+```
+
+The tree supplies the Machine → Space → Tab → Pane hierarchy. Its `pane` token
+uses the pane row's resolved name, so an explicit pane name takes precedence over
+an agent-reported title.
 
 A token entry can also be an inline style table:
 

@@ -558,6 +558,7 @@ fn server_crash_after_attach_causes_lost_connection_error() {
                     let out = String::from_utf8_lossy(&buf[..n]);
                     output.push_str(&out);
                     if out.contains("\u{2500}")
+                        || out.contains(" spaces")
                         || out.contains("workspace")
                         || out.contains("pane")
                         || out.contains("terminal")
@@ -733,6 +734,7 @@ fn attach_thin_client_with_config(
     while Instant::now() < deadline {
         let out = read_output(&output);
         if out.contains('\u{2500}')
+            || out.contains(" spaces")
             || out.contains("workspace")
             || out.contains("pane")
             || out.contains("terminal")
@@ -989,8 +991,8 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         "printf 'LOCAL_RECOVERED_SURFACE\\n'",
     );
     let watermark = output_len(&output);
-    // Select the fresh workspace below Local's restored workspace.
-    input.write_all(b"\x1b[<0;7;5M\x1b[<0;7;5m").unwrap();
+    // Both single-pane spaces use one row each beneath Local.
+    input.write_all(b"\x1b[<0;7;4M\x1b[<0;7;4m").unwrap();
     assert!(
         wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
             read_output(&output)[watermark..].contains("LOCAL_RECOVERED_SURFACE")
@@ -1423,6 +1425,7 @@ fn read_until_client_attaches(client: &SpawnedHerdr) -> String {
             Err(err) => panic!("read thin client PTY: {err}"),
         }
         if output.contains('\u{2500}')
+            || output.contains(" spaces")
             || output.contains("workspace")
             || output.contains("pane")
             || output.contains("terminal")

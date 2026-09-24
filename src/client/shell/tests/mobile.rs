@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn hide_tab_bar_preserves_full_surface_for_multiple_tabs_and_live_reload() {
+    for position in [TabBarPositionConfig::Top, TabBarPositionConfig::Bottom] {
+        let mut config = Config::default();
+        config.ui.tab_bar_position = position;
+        config.ui.hide_tab_bar_when_single_tab = true;
+        let mut shell = ClientShellConfig::from_config(&config);
+        let visible = shell.layout(106, 30, false, 2, 26);
+        assert_eq!(visible.tab_bar.height, 1);
+        assert_eq!(visible.pane_surface.height, 29);
+
+        config.ui.hide_tab_bar = true;
+        assert!(shell.apply_live_config(&config, &[], &[]).is_empty());
+        for tab_count in [1, 2, 10] {
+            let hidden = shell.layout(106, 30, false, tab_count, 26);
+            assert_eq!(hidden.tab_bar.height, 0);
+            assert_eq!(hidden.pane_surface, Rect::new(26, 0, 80, 30));
+            assert_eq!(hidden.sidebar, visible.sidebar);
+        }
+        let initial = ClientShellConfig::from_config(&config);
+        assert_eq!(initial.layout(106, 30, false, 2, 26).tab_bar.height, 0);
+
+        config.ui.hide_tab_bar = false;
+        assert!(shell.apply_live_config(&config, &[], &[]).is_empty());
+        assert_eq!(shell.layout(106, 30, false, 2, 26).tab_bar, visible.tab_bar);
+    }
+}
+
+#[test]
 fn navigate_update_status_uses_released_desktop_and_mobile_placement() {
     let mut config = ClientShellConfig::from_config(&Config::default());
     config.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;

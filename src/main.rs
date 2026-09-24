@@ -308,6 +308,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # New tabs can still be created with the configured keybinding.
 # hide_tab_bar_when_single_tab = false
 
+# Hide the desktop tab row regardless of tab count or position.
+# Tabs remain accessible through the sidebar and configured keybindings.
+# hide_tab_bar = false
+
 # Desktop tab row placement: "top" or "bottom".
 # tab_bar_position = "top"
 

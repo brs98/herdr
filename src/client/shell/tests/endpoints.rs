@@ -286,7 +286,7 @@ fn tree_highlights_focused_pane_and_selected_collapsed_machine() {
         buffer[(machine.x, machine.y)].bg,
         state.config.palette.accent
     );
-    assert_ne!(
+    assert_eq!(
         buffer[(workspace.x + 2, workspace.y)].bg,
         state.config.palette.accent
     );
@@ -296,13 +296,13 @@ fn tree_highlights_focused_pane_and_selected_collapsed_machine() {
         .sidebar_tree_rows
         .iter()
         .find_map(|(rect, target)| match target {
-            ClientNavigatorTarget::Pane {
+            ClientNavigatorTarget::Workspace {
                 endpoint_id: id,
-                pane_id,
-            } if id == &endpoint_id && pane_id == "pane_1" => Some(*rect),
+                workspace_id,
+            } if id == &endpoint_id && workspace_id == "ws_1" => Some(*rect),
             _ => None,
         })
-        .expect("focused remote pane");
+        .expect("focused remote space/pane row");
     assert_eq!(buffer[(pane.x, pane.y)].bg, state.config.palette.accent);
     state.mode = ClientShellMode::Navigate;
     state.sidebar_tree.selected = Some(ClientNavigatorTarget::Machine {
@@ -330,6 +330,14 @@ fn tree_highlights_focused_pane_and_selected_collapsed_machine() {
         .any(|hit| hit.endpoint_id == endpoint_id));
 }
 
+fn split_snapshot() -> ClientShellSnapshot {
+    let mut snapshot = snapshot();
+    let mut pane = snapshot.panes[0].clone();
+    pane.pane_id = "pane_2".into();
+    snapshot.panes.push(pane);
+    snapshot
+}
+
 #[test]
 fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
     use crate::api::schema::AgentStatus;
@@ -351,11 +359,11 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
     state.set_endpoint_catalog(&[profile]);
     state.set_endpoint_status(&endpoint_id, ClientEndpointStatus::Online);
 
-    let mut local = snapshot();
+    let mut local = split_snapshot();
     local.agents = vec![agent("local agent", AgentStatus::Idle, 1)];
     state.set_snapshot(Box::new(local));
     state.set_pane_surface(surface());
-    let mut remote = snapshot();
+    let mut remote = split_snapshot();
     remote.boot_id = "remote-boot".into();
     remote.agents = vec![agent("remote agent", AgentStatus::Blocked, 1)];
     state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
@@ -402,16 +410,16 @@ fn aggregate_priority_navigation_uses_recency_without_reordering_the_tree() {
     state.set_endpoint_catalog(&[profile]);
     state.set_endpoint_status(&endpoint_id, ClientEndpointStatus::Online);
 
-    let mut local = snapshot();
+    let mut local = split_snapshot();
     local.agents = vec![agent("local agent", AgentStatus::Idle, 1)];
     state.set_snapshot(Box::new(local));
     state.set_pane_surface(surface());
-    let mut remote = snapshot();
+    let mut remote = split_snapshot();
     remote.boot_id = "remote-boot".into();
     remote.agents = vec![agent("remote agent", AgentStatus::Idle, 1)];
     state.set_endpoint_snapshot(&endpoint_id, Box::new(remote.clone()));
 
-    let mut local = snapshot();
+    let mut local = split_snapshot();
     local.agents = vec![agent("local agent", AgentStatus::Idle, 2)];
     state.set_snapshot(Box::new(local));
     let frame_text = |state: &mut ClientShellState| {
@@ -704,7 +712,7 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
         Some(ClientEndpointStatus::Reconnecting)
     );
     assert!(text.contains("◐ reconnecting"), "frame: {text}");
-    assert!(text.contains("Build · remote agent"), "frame: {text}");
+    assert!(text.contains("remote-workspace"), "frame: {text}");
     assert!(
         text.contains("LIVE"),
         "frozen surface should remain: {text}"

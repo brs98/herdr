@@ -39,7 +39,7 @@ pub(super) fn render_row_content(
                     .fg(if row.stale {
                         palette.overlay0
                     } else {
-                        palette.text
+                        palette.accent
                     })
                     .add_modifier(Modifier::BOLD),
             );
@@ -159,7 +159,6 @@ fn row_tokens(
                 return fallback();
             };
             let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
-            let pane = snapshot.panes.iter().find(|pane| &pane.pane_id == pane_id);
             let tab_count = snapshot
                 .tabs
                 .iter()
@@ -183,10 +182,7 @@ fn row_tokens(
                     tab: tab
                         .filter(|tab| tab_count > 1 || tab.custom_label)
                         .map(|tab| tab.label.as_str()),
-                    pane: agent
-                        .title
-                        .as_deref()
-                        .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
+                    pane: Some(&row.label),
                     agent_label: agent
                         .display_agent
                         .as_deref()
@@ -233,6 +229,7 @@ rows = [["workspace"], [{ token = "$load", rules = [{ gt = 80, fg = "#ff0000" }]
         let mut endpoint = super::super::local_endpoint();
         endpoint.snapshot = Some(snapshot.into());
         let row = ClientNavigatorRow {
+            sole_pane_id: None,
             depth: 0,
             label: "client-shell".into(),
             meta: String::new(),
@@ -263,6 +260,7 @@ rows = [["workspace"], [{ token = "$load", rules = [{ gt = 80, fg = "#ff0000" }]
     fn focused_tree_row_overrides_token_colors_for_accent_contrast() {
         let config = ClientShellConfig::from_config(&Config::default());
         let row = ClientNavigatorRow {
+            sole_pane_id: None,
             depth: 0,
             label: "shell".into(),
             meta: String::new(),

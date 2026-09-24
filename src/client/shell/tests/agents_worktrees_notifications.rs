@@ -888,7 +888,7 @@ fn navigate_mode_selects_workspace_locally_then_focuses_by_stable_id() {
 
     state.compose(106, 20).expect("initial navigation tree");
     assert!(matches!(state.sidebar_tree.selected.as_ref(),
-        Some(ClientNavigatorTarget::Pane { pane_id, .. }) if pane_id == "pane_1"));
+        Some(ClientNavigatorTarget::Workspace { workspace_id, .. }) if workspace_id == "ws_1"));
     let move_selection = state.handle_input_bytes(b"\x1b[B");
     assert!(move_selection.actions.is_empty());
     assert!(matches!(state.sidebar_tree.selected.as_ref(),

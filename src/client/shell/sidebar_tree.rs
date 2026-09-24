@@ -28,6 +28,7 @@ fn rows(
         let endpoint_id = &endpoint.endpoint_id;
         if federated {
             source.push(ClientNavigatorRow {
+                sole_pane_id: None,
                 depth: 0,
                 label: endpoint.label.clone(),
                 meta: String::new(),
@@ -66,31 +67,67 @@ fn rows(
         for entry in sidebar::workspace_entries(snapshot, groups) {
             let workspace = &snapshot.workspaces[entry.index];
             let depth = u8::from(federated) + u8::from(entry.indented);
+            let workspace_tabs = tabs
+                .get(workspace.workspace_id.as_str())
+                .map_or(&[][..], Vec::as_slice);
+            let sole_pane = if let [tab] = workspace_tabs {
+                panes.get(tab.tab_id.as_str()).and_then(|panes| {
+                    if let [pane] = panes.as_slice() {
+                        Some(*pane)
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+            let sole_agent = sole_pane.and_then(|pane| agents.get(pane.pane_id.as_str()).copied());
             source.push(ClientNavigatorRow {
+                sole_pane_id: sole_pane.map(|pane| pane.pane_id.clone()),
                 depth,
                 label: workspace.label.clone(),
-                meta: workspace.branch.clone().unwrap_or_default(),
+                meta: sole_pane.map_or_else(
+                    || workspace.branch.clone().unwrap_or_default(),
+                    |pane| {
+                        format!(
+                            "{} {} {}",
+                            workspace.branch.as_deref().unwrap_or_default(),
+                            pane.label
+                                .as_deref()
+                                .or_else(|| sole_agent.and_then(|agent| agent.title.as_deref()))
+                                .unwrap_or("pane 1"),
+                            pane.foreground_cwd
+                                .as_deref()
+                                .or(pane.cwd.as_deref())
+                                .unwrap_or_default()
+                        )
+                    },
+                ),
                 status: Some(sidebar::displayed_workspace_status(
                     snapshot, workspace, groups,
                 )),
                 stale,
-                current: false,
+                current: endpoint_id == active
+                    && snapshot.focused_workspace_id.as_deref() == Some(&workspace.workspace_id)
+                    && sole_pane.is_some_and(|pane| {
+                        snapshot.focused_pane_id.as_deref() == Some(&pane.pane_id)
+                    }),
                 target: ClientNavigatorTarget::Workspace {
                     endpoint_id: endpoint_id.clone(),
                     workspace_id: workspace.workspace_id.clone(),
                 },
             });
-            for tab in tabs
-                .get(workspace.workspace_id.as_str())
-                .into_iter()
-                .flatten()
-            {
+            if sole_pane.is_some() {
+                continue;
+            }
+            for tab in workspace_tabs {
                 let tab_panes = panes
                     .get(tab.tab_id.as_str())
                     .map_or(&[][..], Vec::as_slice);
-                let condensed = tab_panes.len() == 1;
-                if !condensed {
+                let show_tab = workspace_tabs.len() > 1 && tab_panes.len() != 1;
+                if show_tab {
                     source.push(ClientNavigatorRow {
+                        sole_pane_id: None,
                         depth: depth + 1,
                         label: tab.label.clone(),
                         meta: format!("{} panes", tab_panes.len()),
@@ -105,18 +142,14 @@ fn rows(
                 }
                 for (index, pane) in tab_panes.iter().enumerate() {
                     let agent = agents.get(pane.pane_id.as_str()).copied();
-                    let label = if condensed && tab.custom_label {
-                        tab.label.clone()
-                    } else {
-                        pane.label
-                            .clone()
-                            .or_else(|| agent.and_then(|agent| agent.name.clone()))
-                            .or_else(|| agent.and_then(|agent| agent.display_agent.clone()))
-                            .or_else(|| agent.and_then(|agent| agent.title.clone()))
-                            .unwrap_or_else(|| format!("pane {}", index + 1))
-                    };
+                    let label = pane
+                        .label
+                        .clone()
+                        .or_else(|| agent.and_then(|agent| agent.title.clone()))
+                        .unwrap_or_else(|| format!("pane {}", index + 1));
                     source.push(ClientNavigatorRow {
-                        depth: depth + if condensed { 1 } else { 2 },
+                        sole_pane_id: None,
+                        depth: depth + 1 + u8::from(show_tab),
                         label,
                         meta: pane
                             .foreground_cwd
@@ -310,7 +343,7 @@ pub(super) fn render_tree(
     let mut number = rows
         .iter()
         .take(tree.scroll)
-        .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
+        .filter(|row| row.represents_pane())
         .count();
     for (offset, row) in rows
         .iter()
@@ -319,7 +352,7 @@ pub(super) fn render_tree(
         .enumerate()
     {
         let rect = Rect::new(body.x, body.y + offset as u16, body.width, 1);
-        let pane = matches!(row.target, ClientNavigatorTarget::Pane { .. });
+        let pane = row.represents_pane();
         let gutter = if pane {
             number += 1;
             format!("{number:>2} ")
@@ -423,6 +456,19 @@ pub(super) fn render_tree(
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;
         super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
+    }
+    if let Some(y) = state
+        .workspace_drop_indicator_row
+        .filter(|y| *y >= body.y && *y < body.bottom())
+    {
+        render::put_text(
+            buffer,
+            body.x,
+            y,
+            body.width,
+            &"─".repeat(body.width as usize),
+            Style::default().fg(palette.accent),
+        );
     }
     let footer = content.bottom().saturating_sub(1);
     if config.mouse_capture {
@@ -605,6 +651,15 @@ impl ClientShellState {
         target: ClientNavigatorTarget,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        let target = if matches!(target, ClientNavigatorTarget::Workspace { .. }) {
+            self.sidebar_rows()
+                .iter()
+                .find(|row| row.target == target)
+                .and_then(ClientNavigatorRow::sole_pane_target)
+                .unwrap_or(target)
+        } else {
+            target
+        };
         let focused = match target {
             ClientNavigatorTarget::Machine { endpoint_id } => {
                 self.activate_endpoint(endpoint_id, outcome)
@@ -645,7 +700,7 @@ impl ClientShellState {
         if let Some(row) = self
             .sidebar_rows()
             .into_iter()
-            .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
+            .filter(|row| row.represents_pane())
             .nth(index)
         {
             self.sidebar_tree.selected = Some(row.target.clone());
@@ -866,10 +921,7 @@ impl ClientShellState {
                 }
                 KeyCode::Backspace => self.sidebar_tree.query.clear(),
                 KeyCode::Char(' ') => {
-                    if let Some(row) = rows
-                        .get(current)
-                        .filter(|row| !matches!(row.target, ClientNavigatorTarget::Pane { .. }))
-                    {
+                    if let Some(row) = rows.get(current).filter(|row| !row.represents_pane()) {
                         self.toggle_sidebar_target(row.target.clone());
                     }
                 }
@@ -883,7 +935,7 @@ impl ClientShellState {
                 }
                 KeyCode::Left => {
                     if let Some(row) = rows.get(current) {
-                        if !matches!(row.target, ClientNavigatorTarget::Pane { .. })
+                        if !row.represents_pane()
                             && !self.sidebar_tree.collapsed.contains(&row.target)
                         {
                             self.sidebar_tree.collapsed.push(row.target.clone());
@@ -977,8 +1029,7 @@ impl ClientShellState {
             .into_iter()
             .find(|row| row.target == target);
         let toggle = row.is_some_and(|row| {
-            !matches!(row.target, ClientNavigatorTarget::Pane { .. })
-                && point.0 == rect.x + 3 + u16::from(row.depth) * 2
+            !row.represents_pane() && point.0 == rect.x + 3 + u16::from(row.depth) * 2
         });
         self.sidebar_tree.selected = Some(target.clone());
         if toggle {
@@ -1003,21 +1054,49 @@ mod tests {
         state
     }
 
+    fn split_shell() -> ClientShellState {
+        let mut state = shell();
+        let mut snapshot = super::super::tests::snapshot();
+        let mut pane = snapshot.panes[0].clone();
+        pane.pane_id = "pane_2".into();
+        snapshot.panes.push(pane);
+        state.set_snapshot(Box::new(snapshot));
+        state
+    }
+
     #[test]
-    fn single_pane_tab_is_condensed_and_numbered_once() {
-        let state = shell();
+    fn single_tab_single_pane_merges_into_space_row() {
+        let mut state = shell();
         let rows = state.sidebar_rows();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1);
         assert!(matches!(
             rows[0].target,
             ClientNavigatorTarget::Workspace { .. }
         ));
-        assert!(matches!(rows[1].target, ClientNavigatorTarget::Pane { .. }));
-        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[0].label, "client-shell");
+        assert_eq!(rows[0].sole_pane_id.as_deref(), Some("pane_1"));
+        assert!(rows[0].represents_pane());
+        assert!(rows[0].current);
+        assert_eq!(rows[0].depth, 0);
+        state.mode = ClientShellMode::Navigate;
+        state.sidebar_tree.selected = Some(rows[0].target.clone());
+        let mut outcome = ClientShellInput::default();
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Char(' ')] {
+            state.route_sidebar_navigation(
+                &crate::input::TerminalKey::new(code, KeyModifiers::empty()),
+                &mut outcome,
+            );
+        }
+        assert!(state.sidebar_tree.collapsed.is_empty());
+        assert!(outcome.actions.is_empty());
+        assert!(state.jump_sidebar(0, &mut outcome));
+        assert!(
+            matches!(outcome.actions.as_slice(), [ClientShellAction::Endpoint { request, .. }] if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_1"))
+        );
     }
 
     #[test]
-    fn split_tab_keeps_header_and_both_panes() {
+    fn only_tab_uses_space_header_with_both_panes_beneath() {
         let mut state = shell();
         let mut snapshot = super::super::tests::snapshot();
         let mut pane = snapshot.panes[0].clone();
@@ -1025,19 +1104,147 @@ mod tests {
         snapshot.panes.push(pane);
         state.set_snapshot(Box::new(snapshot));
         let rows = state.sidebar_rows();
-        assert_eq!(rows.len(), 4);
-        assert!(matches!(rows[1].target, ClientNavigatorTarget::Tab { .. }));
+        assert_eq!(rows.len(), 3);
+        assert!(rows
+            .iter()
+            .all(|row| !matches!(row.target, ClientNavigatorTarget::Tab { .. })));
+        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[2].depth, 1);
+        assert_eq!(rows.iter().filter(|row| row.represents_pane()).count(), 2);
+    }
+
+    #[test]
+    fn multiple_tabs_only_show_headers_for_tabs_with_multiple_panes() {
+        let mut state = shell();
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.tabs[0].label = "hidden single-pane tab".into();
+        snapshot.tabs[0].custom_label = true;
+        snapshot.panes[0].label = Some("first pane".into());
+        let mut split_tab = snapshot.tabs[0].clone();
+        split_tab.tab_id = "tab_2".into();
+        split_tab.label = "split tab".into();
+        snapshot.tabs.push(split_tab);
+        for name in ["second pane", "third pane"] {
+            let mut pane = snapshot.panes[0].clone();
+            pane.pane_id = name.into();
+            pane.tab_id = "tab_2".into();
+            pane.label = Some(name.into());
+            snapshot.panes.push(pane);
+        }
+        state.set_snapshot(Box::new(snapshot));
+        let rows = state.sidebar_rows();
         assert_eq!(
             rows.iter()
-                .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
-                .count(),
-            2
+                .map(|row| (row.depth, row.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, "client-shell"),
+                (1, "first pane"),
+                (1, "split tab"),
+                (2, "second pane"),
+                (2, "third pane")
+            ]
         );
+        state.mode = ClientShellMode::Navigate;
+        state.sidebar_tree.selected = Some(rows[3].target.clone());
+        let left = crate::input::TerminalKey::new(KeyCode::Left, KeyModifiers::empty());
+        let mut outcome = ClientShellInput::default();
+        state.route_sidebar_navigation(&left, &mut outcome);
+        assert_eq!(state.sidebar_tree.selected, Some(rows[2].target.clone()));
+        state.route_sidebar_navigation(&left, &mut outcome);
+        assert_eq!(state.sidebar_rows().len(), 3);
+        assert!(outcome.actions.is_empty());
+    }
+
+    #[test]
+    fn name_only_tree_keeps_parent_labels_separate_and_hides_agent_types() {
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+hide_tab_bar = true
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"]]
+[ui.sidebar.agents]
+rows = [["state_icon", "pane"]]
+"#,
+        )
+        .unwrap();
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.workspaces[0].label = "project".into();
+        snapshot.tabs[0].label = "development".into();
+        snapshot.tabs[0].custom_label = true;
+        snapshot.panes[0].label = Some("fix-login".into());
+        let mut second_pane = snapshot.panes[0].clone();
+        second_pane.pane_id = "pane_2".into();
+        second_pane.label = Some("other pane".into());
+        snapshot.panes.push(second_pane);
+        snapshot.agents.push(crate::protocol::ClientShellAgent {
+            pane_id: "pane_1".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some("codex".into()),
+            display_agent: Some("Codex".into()),
+            agent: Some("codex".into()),
+            title: Some("old agent title".into()),
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: crate::api::schema::AgentStatus::Working,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: true,
+        });
+        state.set_snapshot(Box::new(snapshot.clone()));
+        assert_eq!(
+            state
+                .sidebar_rows()
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["project", "fix-login", "other pane"]
+        );
+        let frame = state.compose(120, 30).unwrap();
+        for (rect, target) in &state.hits.sidebar_tree_rows {
+            let label = match target {
+                ClientNavigatorTarget::Workspace { .. } => "project",
+                ClientNavigatorTarget::Tab { .. } => "development",
+                ClientNavigatorTarget::Pane { pane_id, .. } => {
+                    if pane_id == "pane_1" {
+                        "fix-login"
+                    } else {
+                        "other pane"
+                    }
+                }
+                ClientNavigatorTarget::Machine { .. } => continue,
+            };
+            let line = (rect.x..rect.right())
+                .map(|x| {
+                    frame.cells[usize::from(rect.y) * usize::from(frame.width) + usize::from(x)]
+                        .symbol
+                        .as_str()
+                })
+                .collect::<String>();
+            assert!(line.trim_end().ends_with(label), "{line}");
+            assert!(
+                !line.contains(" · ")
+                    && !line.contains("Codex")
+                    && !line.contains("old agent title"),
+                "{line}"
+            );
+        }
+        snapshot.panes[0].label = None;
+        snapshot.agents[0].title = Some("pane title".into());
+        state.set_snapshot(Box::new(snapshot.clone()));
+        assert_eq!(state.sidebar_rows()[1].label, "pane title");
+        snapshot.agents[0].title = None;
+        state.set_snapshot(Box::new(snapshot));
+        assert_eq!(state.sidebar_rows()[1].label, "pane 1");
     }
 
     #[test]
     fn collapsing_workspace_hides_descendants_search_reveals_them() {
-        let mut state = shell();
+        let mut state = split_shell();
         state
             .sidebar_tree
             .collapsed
@@ -1045,12 +1252,12 @@ mod tests {
         assert_eq!(state.sidebar_rows().len(), 1);
         state.mode = ClientShellMode::Navigate;
         state.sidebar_tree.query = "repo".into();
-        assert_eq!(state.sidebar_rows().len(), 2);
+        assert_eq!(state.sidebar_rows().len(), 3);
     }
 
     #[test]
     fn left_from_pane_selects_parent_then_collapses_it() {
-        let mut state = shell();
+        let mut state = split_shell();
         state.mode = ClientShellMode::Navigate;
         state.sidebar_tree.selected = Some(state.sidebar_rows()[1].target.clone());
         let key = crate::input::TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty());
@@ -1082,7 +1289,7 @@ mod tests {
     }
     #[test]
     fn configured_pane_keys_move_cursor_without_focusing_and_leaf_right_is_noop() {
-        let mut state = shell();
+        let mut state = split_shell();
         state.mode = ClientShellMode::Navigate;
         let mut outcome = ClientShellInput::default();
         let workspace = state.sidebar_rows()[0].target.clone();
@@ -1140,11 +1347,11 @@ mod tests {
         let mut state = shell();
         state.mode = ClientShellMode::Navigate;
         state.sidebar_tree.query = "pane repo".into();
-        assert_eq!(state.sidebar_rows().len(), 2);
+        assert_eq!(state.sidebar_rows().len(), 1);
         state.sidebar_tree.query = "missing".into();
         assert!(state.sidebar_rows().is_empty());
         state.mode = ClientShellMode::Terminal;
-        assert_eq!(state.sidebar_rows().len(), 2);
+        assert_eq!(state.sidebar_rows().len(), 1);
     }
 
     #[test]
@@ -1270,7 +1477,7 @@ mod tests {
             &mut ClientShellInput::default(),
         );
         assert!(!state.collapsed_endpoints.contains(&remote));
-        assert_eq!(state.sidebar_rows().len(), before + 2);
+        assert_eq!(state.sidebar_rows().len(), before + 1);
     }
 
     #[test]

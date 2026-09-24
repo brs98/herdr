@@ -162,6 +162,7 @@ pub(super) fn navigator_rows(
                                 && (endpoint_query_matches || text(&label) || text(&meta))
                         {
                             panes.push(ClientNavigatorRow {
+                                sole_pane_id: None,
                                 depth: 2 + depth_offset,
                                 label,
                                 meta,
@@ -181,6 +182,7 @@ pub(super) fn navigator_rows(
                         || !panes.is_empty()
                     {
                         children.push(ClientNavigatorRow {
+                            sole_pane_id: None,
                             depth: 1 + depth_offset,
                             label: tab.label.clone(),
                             meta: format!(
@@ -207,6 +209,7 @@ pub(super) fn navigator_rows(
                 if !filtering || workspace_matches || !children.is_empty() {
                     let key = (endpoint.endpoint_id.clone(), workspace.workspace_id.clone());
                     endpoint_rows.push(ClientNavigatorRow {
+                        sole_pane_id: None,
                         depth: depth_offset,
                         label: workspace.label.clone(),
                         meta: workspace_meta,
@@ -227,6 +230,7 @@ pub(super) fn navigator_rows(
         if !filtering || endpoint_query_matches || !endpoint_rows.is_empty() {
             if federated {
                 rows.push(ClientNavigatorRow {
+                    sole_pane_id: None,
                     depth: 0,
                     label: endpoint.label.to_owned(),
                     meta: String::new(),
