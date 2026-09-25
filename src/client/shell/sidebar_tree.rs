@@ -19,6 +19,7 @@ fn rows(
     tree: &SidebarTree,
     navigating: bool,
     collapsed_groups: &HashSet<String>,
+    remote_collapsed_groups: &HashMap<ClientEndpointId, HashSet<String>>,
     collapsed_endpoints: &HashSet<ClientEndpointId>,
 ) -> Vec<ClientNavigatorRow> {
     let mut source = Vec::new();
@@ -59,10 +60,14 @@ fn rows(
             .map(|agent| (agent.pane_id.as_str(), agent))
             .collect::<HashMap<_, _>>();
         let expanded_groups = HashSet::new();
-        let groups = if navigating && !tree.query.is_empty() || endpoint_id != active {
+        let groups = if navigating && !tree.query.is_empty() {
             &expanded_groups
-        } else {
+        } else if endpoint_id.is_local() {
             collapsed_groups
+        } else {
+            remote_collapsed_groups
+                .get(endpoint_id)
+                .unwrap_or(&expanded_groups)
         };
         for entry in sidebar::workspace_entries(snapshot, groups) {
             let workspace = &snapshot.workspaces[entry.index];
@@ -266,8 +271,35 @@ pub(super) fn render_tree(
         state.sidebar_tree,
         state.navigating,
         state.collapsed_groups,
+        state.remote_collapsed_groups,
         state.collapsed_endpoints,
     );
+    let gaps = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let next = rows.get(index + 1);
+            if !matches!(row.target, ClientNavigatorTarget::Machine { .. })
+                && next.is_some_and(|next| {
+                    matches!(next.target, ClientNavigatorTarget::Workspace { .. })
+                        && next.depth == u8::from(state.endpoints.len() > 1)
+                })
+            {
+                config.spaces.row_gap
+            } else {
+                0
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut total_lines = 0usize;
+    let row_offsets = gaps
+        .iter()
+        .map(|gap| {
+            let offset = total_lines;
+            total_lines += 1 + usize::from(*gap);
+            offset
+        })
+        .collect::<Vec<_>>();
     let focused_snapshot = state
         .endpoints
         .iter()
@@ -302,25 +334,26 @@ pub(super) fn render_tree(
                 matches!(&row.target, ClientNavigatorTarget::Workspace { endpoint_id, workspace_id } if endpoint_id == state.active_endpoint_id && focused_snapshot.and_then(|snapshot| snapshot.focused_workspace_id.as_deref()) == Some(workspace_id.as_str()))
             }
         }) {
-            if index < tree.scroll {
-                tree.scroll = index;
+            let line = row_offsets[index];
+            if line < tree.scroll {
+                tree.scroll = line;
             }
-            if index >= tree.scroll + body.height as usize {
-                tree.scroll = index.saturating_sub(body.height.saturating_sub(1) as usize);
+            if line >= tree.scroll + body.height as usize {
+                tree.scroll = line.saturating_sub(body.height.saturating_sub(1) as usize);
             }
         }
     }
     tree.scroll = tree
         .scroll
-        .min(rows.len().saturating_sub(body.height as usize));
-    // Use the shared wheel/scrollbar path, with one unit per tree row.
+        .min(total_lines.saturating_sub(body.height as usize));
+    // The tree scrolls in physical lines, including configured workspace gaps.
     *state.workspace_scroll = tree.scroll;
-    let metrics = super::scroll::list_scroll_metrics(
-        &vec![1; rows.len()],
-        &vec![0; rows.len()],
-        body.height,
-        tree.scroll,
-    );
+    let max_scroll = total_lines.saturating_sub(body.height as usize);
+    let metrics = crate::pane::ScrollMetrics {
+        offset_from_bottom: max_scroll.saturating_sub(tree.scroll),
+        max_offset_from_bottom: max_scroll,
+        viewport_rows: usize::from(body.height).min(total_lines),
+    };
     hits.workspace_max_scroll = metrics.max_offset_from_bottom;
     hits.workspace_scroll_metrics = Some(metrics);
     let title = if let Some(number) = &tree.jump {
@@ -342,16 +375,16 @@ pub(super) fn render_tree(
     );
     let mut number = rows
         .iter()
-        .take(tree.scroll)
-        .filter(|row| row.represents_pane())
+        .zip(&row_offsets)
+        .take_while(|(_, offset)| **offset < tree.scroll)
+        .filter(|(row, _)| row.represents_pane())
         .count();
-    for (offset, row) in rows
+    for (row, line) in rows
         .iter()
-        .skip(tree.scroll)
-        .take(body.height as usize)
-        .enumerate()
+        .zip(&row_offsets)
+        .filter(|(_, line)| **line >= tree.scroll && **line < tree.scroll + body.height as usize)
     {
-        let rect = Rect::new(body.x, body.y + offset as u16, body.width, 1);
+        let rect = Rect::new(body.x, body.y + (line - tree.scroll) as u16, body.width, 1);
         let pane = row.represents_pane();
         let gutter = if pane {
             number += 1;
@@ -419,7 +452,6 @@ pub(super) fn render_tree(
                         .position(|workspace| &workspace.workspace_id == workspace_id)
                         .and_then(|index| sidebar::parent_group_key(snapshot, index))
                 })
-                .filter(|_| endpoint_id == state.active_endpoint_id)
                 .map(|key| {
                     let toggle = Rect::new(rect.right().saturating_sub(1), rect.y, 1, 1);
                     render::put_text(
@@ -427,7 +459,13 @@ pub(super) fn render_tree(
                         toggle.x,
                         toggle.y,
                         1,
-                        if state.collapsed_groups.contains(&key) {
+                        if (if endpoint_id.is_local() {
+                            Some(state.collapsed_groups)
+                        } else {
+                            state.remote_collapsed_groups.get(endpoint_id)
+                        })
+                        .is_some_and(|groups| groups.contains(&key))
+                        {
                             "▸"
                         } else {
                             "▾"
@@ -447,6 +485,7 @@ pub(super) fn render_tree(
         if let ClientNavigatorTarget::Machine { endpoint_id } = &row.target {
             hits.machines.push(MachineHit {
                 rect,
+                collapse_toggle: Rect::new(rect.x + 3, rect.y, 1, 1),
                 endpoint_id: endpoint_id.clone(),
             });
         }
@@ -576,7 +615,7 @@ impl ClientShellState {
         &mut self,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        if self.mobile_layout_active() {
+        if self.mobile_layout_active() || self.sidebar_collapsed {
             return true;
         }
         let Some(target) = self.sidebar_tree.selected.as_ref() else {
@@ -631,7 +670,8 @@ impl ClientShellState {
         }) {
             return false;
         }
-        self.navigate_workspace_id = workspace_id;
+        self.navigate_workspace_id =
+            workspace_id.and_then(|id| self.navigation_target(&self.active_endpoint_id, &id));
         true
     }
 
@@ -642,6 +682,7 @@ impl ClientShellState {
             &self.sidebar_tree,
             self.mode == ClientShellMode::Navigate,
             &self.collapsed_groups,
+            &self.remote_collapsed_groups,
             &self.collapsed_endpoints,
         )
     }
@@ -723,7 +764,7 @@ impl ClientShellState {
                 }
             }
             crate::input::KeybindAction::JumpSidebarItemPrompt => {
-                if self.mobile_layout_active() {
+                if self.mobile_layout_active() || self.sidebar_collapsed {
                     return true;
                 }
                 self.mode = ClientShellMode::Navigate;
@@ -823,7 +864,7 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        if self.mobile_layout_active() {
+        if self.mobile_layout_active() || self.sidebar_collapsed {
             return false;
         }
         if let Some(crate::input::KeybindMatch::Action(action)) =
@@ -985,12 +1026,12 @@ impl ClientShellState {
     }
 
     fn toggle_sidebar_target(&mut self, target: ClientNavigatorTarget) {
-        let removed_endpoint = match &target {
-            ClientNavigatorTarget::Machine { endpoint_id } => {
-                self.collapsed_endpoints.remove(endpoint_id)
+        if let ClientNavigatorTarget::Machine { endpoint_id } = target {
+            if !self.collapsed_endpoints.remove(&endpoint_id) {
+                self.collapsed_endpoints.insert(endpoint_id);
             }
-            _ => false,
-        };
+            return;
+        }
         if let Some(index) = self
             .sidebar_tree
             .collapsed
@@ -998,7 +1039,7 @@ impl ClientShellState {
             .position(|candidate| candidate == &target)
         {
             self.sidebar_tree.collapsed.remove(index);
-        } else if !removed_endpoint {
+        } else {
             self.sidebar_tree.collapsed.push(target);
         }
     }
